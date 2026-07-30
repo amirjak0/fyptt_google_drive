@@ -7,9 +7,8 @@ from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 import yt_dlp
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload
 from google.auth.transport.requests import Request
-import io
 
 # وارد کردن کتابخانه curl_cffi برای دور زدن سیستم کلودفلر
 try:
@@ -23,6 +22,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 DOWNLOAD_FOLDER = 'downloads'
 MAX_DOWNLOADS_PER_RUN = 100
+HISTORY_FILE = 'download_history.txt'
 
 # تنظیم ترتیب دانلود: اگر True باشد، ویدیوها از آخر به اول دانلود می‌شوند.
 REVERSE_VIDEO_ORDER = os.environ.get("REVERSE_VIDEO_ORDER", "False").lower() in ("true", "1", "yes")
@@ -55,65 +55,36 @@ def get_gdrive_service():
         logging.error(f"خطا در اتصال به گوگل درایو: {e}")
         return None
 
-def get_history_file_id(service, folder_id):
-    try:
-        query = f"'{folder_id}' in parents and name = 'gdrive_download_history.txt' and trashed=false"
-        results = service.files().list(q=query, spaces='drive', fields='files(id)').execute()
-        items = results.get('files', [])
-        if items:
-            return items[0]['id']
-    except Exception as e:
-        logging.error(f"خطا در جستجوی فایل تاریخچه: {e}")
-    return None
-
-def load_history(service, folder_id):
+def load_history():
+    """
+    بارگذاری تاریخچه به صورت محلی از گیت‌هاب
+    """
     history = set()
-    file_id = get_history_file_id(service, folder_id)
-    if not file_id:
-        logging.info("فایل تاریخچه (gdrive_download_history.txt) یافت نشد. یک فایل جدید ایجاد خواهد شد.")
-        return history, None
-    
-    try:
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        fh.seek(0)
-        content = fh.read().decode('utf-8', errors='ignore')
-        for line in content.splitlines():
-            line = line.strip()
-            if line:
-                history.add(line)
-        logging.info(f"تعداد {len(history)} ویدیو از تاریخچه قبلی بارگذاری شد.")
-        return history, file_id
-    except Exception as e:
-        logging.error(f"خطا در بارگذاری فایل تاریخچه: {e}")
-        return history, file_id
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        history.add(line)
+            logging.info(f"تعداد {len(history)} ویدیو از تاریخچه محلی (گیت‌هاب) بارگذاری شد.")
+        except Exception as e:
+            logging.error(f"خطا در بارگذاری تاریخچه محلی: {e}")
+    else:
+        logging.info("فایل تاریخچه محلی یافت نشد. یک فایل جدید ایجاد خواهد شد.")
+    return history
 
-def save_history(service, folder_id, file_id, history_set):
-    content = "\n".join(sorted(list(history_set)))
-    temp_file = "temp_history.txt"
-    with open(temp_file, "w", encoding="utf-8") as f:
-        f.write(content)
-    
+def save_history(history_set):
+    """
+    ذخیره تاریخچه به صورت محلی برای کامیت شدن در گیت‌هاب
+    """
     try:
-        media = MediaFileUpload(temp_file, mimetype='text/plain', resumable=True)
-        if file_id:
-            service.files().update(fileId=file_id, media_body=media).execute()
-            logging.info("فایل تاریخچه در گوگل درایو با موفقیت بروزرسانی شد.")
-        else:
-            file_metadata = {'name': 'gdrive_download_history.txt', 'parents': [folder_id]}
-            new_file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-            logging.info(f"فایل تاریخچه جدید در گوگل درایو ساخته شد. شناسه: {new_file.get('id')}")
-            file_id = new_file.get('id')
+        content = "\n".join(sorted(list(history_set)))
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            f.write(content)
+        logging.info("فایل تاریخچه محلی با موفقیت ذخیره شد.")
     except Exception as e:
-        logging.error(f"خطا در ذخیره فایل تاریخچه: {e}")
-    finally:
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
-    return file_id
+        logging.error(f"خطا در ذخیره تاریخچه محلی: {e}")
 
 def upload_to_gdrive(service, folder_id, file_path):
     logging.info(f"در حال آپلود: {os.path.basename(file_path)}")
@@ -144,6 +115,15 @@ def get_clean_url_key(url):
     except Exception:
         return url
 
+def get_ydl_impersonate_opts():
+    opts = {}
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        opts['impersonate'] = ImpersonateTarget.from_str('chrome')
+    except Exception:
+        opts['impersonate'] = 'chrome'
+    return opts
+
 def scrape_video_links(target_url):
     video_links = []
     target_domain = urlparse(target_url).netloc
@@ -157,7 +137,15 @@ def scrape_video_links(target_url):
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # اسکن تمام لینک‌های صفحه <a> برای پیدا کردن لینک صفحات ویدیوها (فرمت: /number/title-slug/)
+        for video_tag in soup.find_all('video'):
+            src = video_tag.get('src')
+            if src:
+                video_links.append(urljoin(target_url, src))
+            for source in video_tag.find_all('source'):
+                source_src = source.get('src')
+                if source_src:
+                    video_links.append(urljoin(target_url, source_src))
+                    
         for a_tag in soup.find_all('a'):
             href = a_tag.get('href')
             if href:
@@ -165,13 +153,11 @@ def scrape_video_links(target_url):
                 parsed = urlparse(full_url)
                 path = parsed.path.lower()
                 
-                # ۱. بررسی اینکه آیا لینک به یک فایل ویدیویی مستقیم ختم می‌شود
                 video_extensions = ('.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.3gp', '.m3u8')
                 if any(path.endswith(ext) for ext in video_extensions):
                     video_links.append(full_url)
                     continue
                 
-                # ۲. بررسی اینکه آیا لینک به یک صفحه داخلی ویدیو در این سایت اشاره دارد (الگوی عدد اول مسیر)
                 if parsed.netloc == target_domain:
                     path_parts = path.strip('/').split('/')
                     if path_parts and path_parts[0].isdigit():
@@ -190,9 +176,6 @@ def scrape_video_links(target_url):
     return unique_links
 
 def extract_post_info(url):
-    """
-    استخراج شناسه ویدیو و عنوان از روی آدرس صفحه پست
-    """
     try:
         parsed = urlparse(url)
         path_parts = parsed.path.strip('/').split('/')
@@ -200,7 +183,6 @@ def extract_post_info(url):
             post_id = path_parts[0]
             post_title = "video"
             if len(path_parts) > 1:
-                # تبدیل ساختار نام-ویدیو به نام ویدیو جهت نام‌گذاری فایل نهایی
                 post_title = path_parts[1].replace('-', ' ').title()
             return post_id, post_title
     except Exception:
@@ -208,15 +190,11 @@ def extract_post_info(url):
     return "unknown", "video"
 
 def extract_direct_video_url(post_url, headers):
-    """
-    اسکن عمیق صفحه پست برای یافتن آدرس مستقیم فایل mp4 از درون فریم‌های jwplayer
-    """
     try:
         response = requests_cffi.get(post_url, headers=headers, impersonate="chrome", timeout=15)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # تابع کمکی برای جستجو در میان تگ‌ها و اسکریپت‌ها
         def find_src_in_soup(s):
             for v in s.find_all('video'):
                 src = v.get('src')
@@ -228,7 +206,6 @@ def extract_direct_video_url(post_url, headers):
                 meta = s.find('meta', property=meta_prop)
                 if meta and meta.get('content'):
                     return meta.get('content')
-            # جستجو در کدهای جاوا اسکریپت برای پیدا کردن متغیرهای فیلم
             for script in s.find_all('script'):
                 if script.string:
                     match = re.search(r'file\s*:\s*["\'](https?://[^"\']+\.mp4(?:\?[^"\']*)?)["\']', script.string)
@@ -239,19 +216,16 @@ def extract_direct_video_url(post_url, headers):
                         return match_generic.group(1)
             return None
 
-        # ۱. ابتدا در صفحه اصلی بررسی می‌کنیم
         direct_url = find_src_in_soup(soup)
         if direct_url:
             return urljoin(post_url, direct_url)
             
-        # ۲. اگر پیدا نشد، به دنبال فریم‌های پلیر (مانند fypttstr.php) می‌گردیم
         for iframe in soup.find_all('iframe'):
             src = iframe.get('src')
             if src and ('fypttstr.php' in src or 'player' in src or 'embed' in src):
                 iframe_url = urljoin(post_url, src)
                 logging.info(f"یافتن فریم ویدیو پلیر: {iframe_url}")
                 
-                # لود کردن فریم پلیر با مرورگر شبیه‌سازی شده کروم
                 iframe_resp = requests_cffi.get(iframe_url, headers=headers, impersonate="chrome", timeout=15)
                 iframe_resp.raise_for_status()
                 iframe_soup = BeautifulSoup(iframe_resp.text, 'html.parser')
@@ -276,7 +250,8 @@ def download_and_process():
     if not service:
         return
 
-    history, history_file_id = load_history(service, folder_id)
+    # بارگذاری تاریخچه محلی از مخزن گیت‌هاب
+    history = load_history()
 
     logging.info(f"در حال بررسی صفحه هدف: {target_url}")
     scraped_urls = scrape_video_links(target_url)
@@ -285,7 +260,6 @@ def download_and_process():
         logging.warning("هیچ ویدیویی در صفحه مورد نظر یافت نشد.")
         return
 
-    # معکوس کردن لیست اگر کاربر در تنظیمات آن را فعال کرده باشد
     if REVERSE_VIDEO_ORDER:
         logging.info("ترتیب دانلود طبق تنظیمات کاربر معکوس شد.")
         scraped_urls.reverse()
@@ -312,7 +286,6 @@ def download_and_process():
         post_id, post_title = extract_post_info(url)
         logging.info(f"شروع پردازش ویدیوی جدید: [{post_id}] {post_title}")
         
-        # استخراج آدرس مستقیم فایل mp4 ویدیو برای دور زدن لایه Unsupported URL
         direct_video_url = extract_direct_video_url(url, headers)
         if not direct_video_url:
             logging.warning(f"امکان استخراج فایل ویدیو از آدرس {url} وجود نداشت. ویدیو رد شد.")
@@ -320,9 +293,8 @@ def download_and_process():
             
         logging.info(f"آدرس مستقیم فایل ویدیو با موفقیت استخراج شد: {direct_video_url}")
 
-        # تنظیم نام زیبای ویدیو بر اساس عنوان تمیز شده صفحه
         clean_title = "".join(c for c in post_title if c.isalnum() or c in (' ', '_', '-')).strip()
-        clean_title = clean_title[:80] # محدود کردن طول نام فایل
+        clean_title = clean_title[:80]
 
         download_opts = {
             'format': 'best',
@@ -344,7 +316,6 @@ def download_and_process():
                 duration = info.get('duration')
                 expected_path = ydl.prepare_filename(info)
                 
-                # اصلاح پسوند در صورت نیاز
                 file_path = expected_path
                 if not os.path.exists(file_path):
                     base_path = os.path.splitext(expected_path)[0]
@@ -376,8 +347,9 @@ def download_and_process():
         except Exception as e:
             logging.error(f"خطا در پردازش ویدیو {url}: {e}")
 
+    # در صورت تغییر تاریخچه، آن را به عنوان یک فایل محلی ذخیره کن
     if history_changed:
-        save_history(service, folder_id, history_file_id, history)
+        save_history(history)
 
 if __name__ == "__main__":
     setup_environment()
