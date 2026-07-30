@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "yt-dlp[default]" google-api-python-client google-auth-oauthlib google-auth-httplib2 beautifulsoup4 requests
+          pip install "yt-dlp[default,curl-cffi]" google-api-python-client google-auth-oauthlib google-auth-httplib2 beautifulsoup4 curl_cffi
 
       - name: Run script
         env:
