@@ -144,33 +144,29 @@ def get_clean_url_key(url):
         return url
 
 def get_ydl_impersonate_opts():
-    """
-    دریافت تنظیمات شبیه‌سازی هویت مرورگر برای ساختار جدید yt-dlp
-    """
     opts = {}
     try:
         from yt_dlp.networking.impersonate import ImpersonateTarget
         opts['impersonate'] = ImpersonateTarget.from_str('chrome')
     except Exception:
-        # در صورتی که کلاس بالا موجود نباشد، رشته خام را ارسال می‌کنیم
         opts['impersonate'] = 'chrome'
     return opts
 
 def scrape_video_links(target_url):
     video_links = []
+    target_domain = urlparse(target_url).netloc
     
-    # روش اول: استفاده از curl_cffi برای دور زدن کلودفلر و گرفتن تگ‌های HTML
+    # استفاده از curl_cffi برای دور زدن کلودفلر و گرفتن تگ‌های HTML
     try:
         logging.info("در حال ارسال درخواست وب‌سایت با تکنولوژی curl_cffi (تقلید هویت کروم)...")
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
-        # استفاده از impersonate="chrome" برای عبور از سد امنیتی کلودفلر
         response = requests_cffi.get(target_url, headers=headers, impersonate="chrome", timeout=20)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # اسکن تگ‌های <video> و <source>
+        # اسکن تگ‌های <video> و <source> برای یافتن ویدیوهای احتمالی تعبیه شده مستقیم
         for video_tag in soup.find_all('video'):
             src = video_tag.get('src')
             if src:
@@ -180,40 +176,29 @@ def scrape_video_links(target_url):
                 if source_src:
                     video_links.append(urljoin(target_url, source_src))
                     
-        # اسکن تگ‌های <a> که مستقیماً به فرمت‌های ویدیویی لینک شده‌اند
-        video_extensions = ('.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.3gp', '.m3u8')
+        # اسکن تمام لینک‌های صفحه <a> برای پیدا کردن لینک صفحات ویدیوها (مثل /video/xxxx)
         for a_tag in soup.find_all('a'):
             href = a_tag.get('href')
             if href:
-                parsed = urlparse(href)
+                full_url = urljoin(target_url, href)
+                parsed = urlparse(full_url)
                 path = parsed.path.lower()
+                
+                # ۱. بررسی اینکه آیا لینک به یک فایل ویدیویی مستقیم ختم می‌شود
+                video_extensions = ('.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.3gp', '.m3u8')
                 if any(path.endswith(ext) for ext in video_extensions):
-                    video_links.append(urljoin(target_url, href))
-                    
+                    video_links.append(full_url)
+                    continue
+                
+                # ۲. بررسی اینکه آیا لینک به یک صفحه داخلی ویدیو در این سایت اشاره دارد (مخصوص fyptt.to)
+                if parsed.netloc == target_domain:
+                    # اسکن برای یافتن ساختارهای صفحات ویدیو
+                    if '/video/' in path or '/post/' in path or '/reel/' in path or '/watch/' in path or '/play/' in path:
+                        video_links.append(full_url)
+                        
     except Exception as e:
         logging.error(f"خطا در اسکن اولیه صفحه با BeautifulSoup: {e}")
         
-    # روش دوم کمکی: استفاده از اسکنر عمومی yt-dlp به همراه ویژگی شبیه‌ساز هویت مرورگر
-    if not video_links:
-        logging.info("تگ مستقیمی یافت نشد. در حال تلاش با اسکنر عمومی yt-dlp...")
-        ydl_opts = {
-            'extract_flat': 'in_playlist',
-            'quiet': True,
-            'no_warnings': True,
-            'extractor_args': {'generic': ['impersonate']},
-        }
-        ydl_opts.update(get_ydl_impersonate_opts())
-        
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                playlist_dict = ydl.extract_info(target_url, download=False)
-                if playlist_dict and 'entries' in playlist_dict:
-                    for entry in playlist_dict['entries']:
-                        if entry and entry.get('url'):
-                            video_links.append(entry.get('url'))
-        except Exception as e:
-            logging.error(f"خطا در استخراج با yt-dlp: {e}")
-
     seen = set()
     unique_links = []
     for link in video_links:
