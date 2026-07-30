@@ -1,7 +1,6 @@
 import os
 import logging
 import mimetypes
-import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 import yt_dlp
@@ -10,6 +9,13 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from google.auth.transport.requests import Request
 import io
+
+# وارد کردن کتابخانه curl_cffi برای دور زدن سیستم کلودفلر
+try:
+    from curl_cffi import requests as requests_cffi
+except ImportError:
+    logging.warning("کتابخانه curl_cffi نصب نیست. ممکن است با خطای 403 مواجه شوید.")
+    import requests as requests_cffi
 
 # تنظیمات لاگ‌گیری
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -137,15 +143,30 @@ def get_clean_url_key(url):
     except Exception:
         return url
 
+def get_ydl_impersonate_opts():
+    """
+    دریافت تنظیمات شبیه‌سازی هویت مرورگر برای ساختار جدید yt-dlp
+    """
+    opts = {}
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        opts['impersonate'] = ImpersonateTarget.from_str('chrome')
+    except Exception:
+        # در صورتی که کلاس بالا موجود نباشد، رشته خام را ارسال می‌کنیم
+        opts['impersonate'] = 'chrome'
+    return opts
+
 def scrape_video_links(target_url):
     video_links = []
     
-    # روش اول: استفاده از BeautifulSoup برای پیدا کردن تگ‌های HTML مربوط به ویدیوها
+    # روش اول: استفاده از curl_cffi برای دور زدن کلودفلر و گرفتن تگ‌های HTML
     try:
+        logging.info("در حال ارسال درخواست وب‌سایت با تکنولوژی curl_cffi (تقلید هویت کروم)...")
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
-        response = requests.get(target_url, headers=headers, timeout=20)
+        # استفاده از impersonate="chrome" برای عبور از سد امنیتی کلودفلر
+        response = requests_cffi.get(target_url, headers=headers, impersonate="chrome", timeout=20)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         
@@ -172,14 +193,17 @@ def scrape_video_links(target_url):
     except Exception as e:
         logging.error(f"خطا در اسکن اولیه صفحه با BeautifulSoup: {e}")
         
-    # روش دوم کمکی: استفاده از اسکنر عمومی yt-dlp
+    # روش دوم کمکی: استفاده از اسکنر عمومی yt-dlp به همراه ویژگی شبیه‌ساز هویت مرورگر
     if not video_links:
         logging.info("تگ مستقیمی یافت نشد. در حال تلاش با اسکنر عمومی yt-dlp...")
         ydl_opts = {
             'extract_flat': 'in_playlist',
             'quiet': True,
             'no_warnings': True,
+            'extractor_args': {'generic': ['impersonate']},
         }
+        ydl_opts.update(get_ydl_impersonate_opts())
+        
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 playlist_dict = ydl.extract_info(target_url, download=False)
@@ -268,7 +292,9 @@ def download_and_process():
         ydl_opts_info = {
             'quiet': True,
             'no_warnings': True,
+            'extractor_args': {'generic': ['impersonate']},
         }
+        ydl_opts_info.update(get_ydl_impersonate_opts())
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
@@ -287,8 +313,10 @@ def download_and_process():
             'format': 'bestvideo+bestaudio/best',
             'outtmpl': f'{DOWNLOAD_FOLDER}/%(title)s [%(id)s].%(ext)s',
             'merge_output_format': 'mp4',
-            'ignoreerrors': True
+            'ignoreerrors': True,
+            'extractor_args': {'generic': ['impersonate']},
         }
+        download_opts.update(get_ydl_impersonate_opts())
 
         try:
             with yt_dlp.YoutubeDL(download_opts) as ydl:
