@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import mimetypes
 from bs4 import BeautifulSoup
@@ -23,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 DOWNLOAD_FOLDER = 'downloads'
 MAX_DOWNLOADS_PER_RUN = 100
 
-# تنظیم ترتیب دانلود: اگر True باشد، ویدیوها از آخر به اول (پایین صفحه به بالا) دانلود می‌شوند.
+# تنظیم ترتیب دانلود: اگر True باشد، ویدیوها از آخر به اول دانلود می‌شوند.
 REVERSE_VIDEO_ORDER = os.environ.get("REVERSE_VIDEO_ORDER", "False").lower() in ("true", "1", "yes")
 
 def setup_environment():
@@ -143,20 +144,10 @@ def get_clean_url_key(url):
     except Exception:
         return url
 
-def get_ydl_impersonate_opts():
-    opts = {}
-    try:
-        from yt_dlp.networking.impersonate import ImpersonateTarget
-        opts['impersonate'] = ImpersonateTarget.from_str('chrome')
-    except Exception:
-        opts['impersonate'] = 'chrome'
-    return opts
-
 def scrape_video_links(target_url):
     video_links = []
     target_domain = urlparse(target_url).netloc
     
-    # استفاده از curl_cffi برای دور زدن کلودفلر و گرفتن تگ‌های HTML
     try:
         logging.info("در حال ارسال درخواست وب‌سایت با تکنولوژی curl_cffi (تقلید هویت کروم)...")
         headers = {
@@ -166,16 +157,6 @@ def scrape_video_links(target_url):
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # اسکن تگ‌های <video> و <source> برای یافتن ویدیوهای تعبیه شده مستقیم
-        for video_tag in soup.find_all('video'):
-            src = video_tag.get('src')
-            if src:
-                video_links.append(urljoin(target_url, src))
-            for source in video_tag.find_all('source'):
-                source_src = source.get('src')
-                if source_src:
-                    video_links.append(urljoin(target_url, source_src))
-                    
         # اسکن تمام لینک‌های صفحه <a> برای پیدا کردن لینک صفحات ویدیوها (فرمت: /number/title-slug/)
         for a_tag in soup.find_all('a'):
             href = a_tag.get('href')
@@ -192,9 +173,7 @@ def scrape_video_links(target_url):
                 
                 # ۲. بررسی اینکه آیا لینک به یک صفحه داخلی ویدیو در این سایت اشاره دارد (الگوی عدد اول مسیر)
                 if parsed.netloc == target_domain:
-                    # بخش‌های مختلف آدرس بعد از دامنه را جدا می‌کنیم
                     path_parts = path.strip('/').split('/')
-                    # اگر اولین پوشه بعد از دامنه یک عدد باشد (مثلاً 23511)، این یک صفحه ویدیو است
                     if path_parts and path_parts[0].isdigit():
                         video_links.append(full_url)
                         
@@ -210,27 +189,79 @@ def scrape_video_links(target_url):
             
     return unique_links
 
-def find_downloaded_file(info, expected_path):
-    if os.path.exists(expected_path):
-        return expected_path
-    
-    base_path = os.path.splitext(expected_path)[0]
-    for ext in ['mp4', 'mkv', 'webm', 'avi']:
-        test_path = f"{base_path}.{ext}"
-        if os.path.exists(test_path):
-            return test_path
-            
+def extract_post_info(url):
+    """
+    استخراج شناسه ویدیو و عنوان از روی آدرس صفحه پست
+    """
     try:
-        title = info.get('title', '')
-        video_id = info.get('id', '')
-        files = [os.path.join(DOWNLOAD_FOLDER, f) for f in os.listdir(DOWNLOAD_FOLDER)]
-        files.sort(key=os.path.getmtime, reverse=True)
-        for f in files:
-            if (video_id and video_id in f) or (title and title[:15] in f):
-                return f
-    except Exception as e:
-        logging.error(f"خطا در جستجوی فایل دانلود شده در پوشه محلی: {e}")
+        parsed = urlparse(url)
+        path_parts = parsed.path.strip('/').split('/')
+        if path_parts and path_parts[0].isdigit():
+            post_id = path_parts[0]
+            post_title = "video"
+            if len(path_parts) > 1:
+                # تبدیل ساختار نام-ویدیو به نام ویدیو جهت نام‌گذاری فایل نهایی
+                post_title = path_parts[1].replace('-', ' ').title()
+            return post_id, post_title
+    except Exception:
+        pass
+    return "unknown", "video"
+
+def extract_direct_video_url(post_url, headers):
+    """
+    اسکن عمیق صفحه پست برای یافتن آدرس مستقیم فایل mp4 از درون فریم‌های jwplayer
+    """
+    try:
+        response = requests_cffi.get(post_url, headers=headers, impersonate="chrome", timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
         
+        # تابع کمکی برای جستجو در میان تگ‌ها و اسکریپت‌ها
+        def find_src_in_soup(s):
+            for v in s.find_all('video'):
+                src = v.get('src')
+                if src: return src
+            for src_tag in s.find_all('source'):
+                src = src_tag.get('src')
+                if src: return src
+            for meta_prop in ['og:video', 'og:video:secure_url', 'og:video:url']:
+                meta = s.find('meta', property=meta_prop)
+                if meta and meta.get('content'):
+                    return meta.get('content')
+            # جستجو در کدهای جاوا اسکریپت برای پیدا کردن متغیرهای فیلم
+            for script in s.find_all('script'):
+                if script.string:
+                    match = re.search(r'file\s*:\s*["\'](https?://[^"\']+\.mp4(?:\?[^"\']*)?)["\']', script.string)
+                    if match:
+                        return match.group(1)
+                    match_generic = re.search(r'["\'](https?://[^"\']+\.mp4(?:\?[^"\']*)?)["\']', script.string)
+                    if match_generic:
+                        return match_generic.group(1)
+            return None
+
+        # ۱. ابتدا در صفحه اصلی بررسی می‌کنیم
+        direct_url = find_src_in_soup(soup)
+        if direct_url:
+            return urljoin(post_url, direct_url)
+            
+        # ۲. اگر پیدا نشد، به دنبال فریم‌های پلیر (مانند fypttstr.php) می‌گردیم
+        for iframe in soup.find_all('iframe'):
+            src = iframe.get('src')
+            if src and ('fypttstr.php' in src or 'player' in src or 'embed' in src):
+                iframe_url = urljoin(post_url, src)
+                logging.info(f"یافتن فریم ویدیو پلیر: {iframe_url}")
+                
+                # لود کردن فریم پلیر با مرورگر شبیه‌سازی شده کروم
+                iframe_resp = requests_cffi.get(iframe_url, headers=headers, impersonate="chrome", timeout=15)
+                iframe_resp.raise_for_status()
+                iframe_soup = BeautifulSoup(iframe_resp.text, 'html.parser')
+                
+                iframe_video = find_src_in_soup(iframe_soup)
+                if iframe_video:
+                    return urljoin(iframe_url, iframe_video)
+                    
+    except Exception as e:
+        logging.error(f"خطا در استخراج آدرس مستقیم ویدیو از {post_url}: {e}")
     return None
 
 def download_and_process():
@@ -256,10 +287,14 @@ def download_and_process():
 
     # معکوس کردن لیست اگر کاربر در تنظیمات آن را فعال کرده باشد
     if REVERSE_VIDEO_ORDER:
-        logging.info("ترتیب دانلود طبق تنظیمات کاربر معکوس شد تا انتهای صفحه (پایین صفحه) زودتر دانلود شود.")
+        logging.info("ترتیب دانلود طبق تنظیمات کاربر معکوس شد.")
         scraped_urls.reverse()
 
     logging.info(f"تعداد {len(scraped_urls)} لینک ویدیوی منحصر‌به‌فرد یافت شد.")
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
 
     downloaded_count = 0
     history_changed = False
@@ -274,50 +309,53 @@ def download_and_process():
             logging.info(f"این ویدیو قبلاً پردازش شده است و نادیده گرفته می‌شود: {clean_key}")
             continue
 
-        logging.info(f"شروع پردازش ویدیوی جدید: {url}")
+        post_id, post_title = extract_post_info(url)
+        logging.info(f"شروع پردازش ویدیوی جدید: [{post_id}] {post_title}")
         
-        ydl_opts_info = {
-            'quiet': True,
-            'no_warnings': True,
-            'extractor_args': {'generic': ['impersonate']},
-        }
-        ydl_opts_info.update(get_ydl_impersonate_opts())
-        
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if info:
-                    duration = info.get('duration')
-                    if duration is not None and duration > 600:
-                        logging.info(f"مدت زمان ویدیو ({duration} ثانیه) از ۱۰ دقیقه بیشتر است. رد شد.")
-                        history.add(clean_key)
-                        history_changed = True
-                        continue
-        except Exception as e:
-            logging.warning(f"امکان دریافت اطلاعات زمانی پیش از دانلود وجود نداشت ({e}). دانلود شروع می‌شود تا مستقیماً تست شود.")
+        # استخراج آدرس مستقیم فایل mp4 ویدیو برای دور زدن لایه Unsupported URL
+        direct_video_url = extract_direct_video_url(url, headers)
+        if not direct_video_url:
+            logging.warning(f"امکان استخراج فایل ویدیو از آدرس {url} وجود نداشت. ویدیو رد شد.")
+            continue
+            
+        logging.info(f"آدرس مستقیم فایل ویدیو با موفقیت استخراج شد: {direct_video_url}")
+
+        # تنظیم نام زیبای ویدیو بر اساس عنوان تمیز شده صفحه
+        clean_title = "".join(c for c in post_title if c.isalnum() or c in (' ', '_', '-')).strip()
+        clean_title = clean_title[:80] # محدود کردن طول نام فایل
 
         download_opts = {
-            'format': 'bestvideo+bestaudio/best',
-            'outtmpl': f'{DOWNLOAD_FOLDER}/%(title)s [%(id)s].%(ext)s',
-            'merge_output_format': 'mp4',
+            'format': 'best',
+            'outtmpl': f'{DOWNLOAD_FOLDER}/{clean_title} [{post_id}].%(ext)s',
             'ignoreerrors': True,
-            'extractor_args': {'generic': ['impersonate']},
+            'http_headers': {
+                'Referer': url,
+                'User-Agent': headers['User-Agent']
+            }
         }
-        download_opts.update(get_ydl_impersonate_opts())
 
         try:
             with yt_dlp.YoutubeDL(download_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                info = ydl.extract_info(direct_video_url, download=True)
                 if info is None:
-                    logging.warning(f"دانلود ویدیو از آدرس {url} ناموفق بود.")
+                    logging.warning(f"دانلود ویدیو از آدرس مستقیم {direct_video_url} ناموفق بود.")
                     continue
                 
                 duration = info.get('duration')
                 expected_path = ydl.prepare_filename(info)
-                file_path = find_downloaded_file(info, expected_path)
+                
+                # اصلاح پسوند در صورت نیاز
+                file_path = expected_path
+                if not os.path.exists(file_path):
+                    base_path = os.path.splitext(expected_path)[0]
+                    for ext in ['mp4', 'mkv', 'webm', 'avi']:
+                        test_path = f"{base_path}.{ext}"
+                        if os.path.exists(test_path):
+                            file_path = test_path
+                            break
 
                 if duration is not None and duration > 600:
-                    logging.info(f"مدت زمان ویدیو پس از دانلود ({duration} ثانیه) بیش از حد مجاز تشخیص داده شد. حذف فایل...")
+                    logging.info(f"مدت زمان ویدیو پس از دانلود ({duration} ثانیه) بیش از ۱۰ دقیقه است. حذف فایل...")
                     if file_path and os.path.exists(file_path):
                         os.remove(file_path)
                     history.add(clean_key)
