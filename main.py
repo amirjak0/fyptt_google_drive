@@ -166,7 +166,7 @@ def scrape_video_links(target_url):
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # اسکن تگ‌های <video> و <source> برای یافتن ویدیوهای احتمالی تعبیه شده مستقیم
+        # اسکن تگ‌های <video> و <source> برای یافتن ویدیوهای تعبیه شده مستقیم
         for video_tag in soup.find_all('video'):
             src = video_tag.get('src')
             if src:
@@ -176,7 +176,7 @@ def scrape_video_links(target_url):
                 if source_src:
                     video_links.append(urljoin(target_url, source_src))
                     
-        # اسکن تمام لینک‌های صفحه <a> برای پیدا کردن لینک صفحات ویدیوها (مثل /video/xxxx)
+        # اسکن تمام لینک‌های صفحه <a> برای پیدا کردن لینک صفحات ویدیوها (فرمت: /number/title-slug/)
         for a_tag in soup.find_all('a'):
             href = a_tag.get('href')
             if href:
@@ -190,10 +190,12 @@ def scrape_video_links(target_url):
                     video_links.append(full_url)
                     continue
                 
-                # ۲. بررسی اینکه آیا لینک به یک صفحه داخلی ویدیو در این سایت اشاره دارد (مخصوص fyptt.to)
+                # ۲. بررسی اینکه آیا لینک به یک صفحه داخلی ویدیو در این سایت اشاره دارد (الگوی عدد اول مسیر)
                 if parsed.netloc == target_domain:
-                    # اسکن برای یافتن ساختارهای صفحات ویدیو
-                    if '/video/' in path or '/post/' in path or '/reel/' in path or '/watch/' in path or '/play/' in path:
+                    # بخش‌های مختلف آدرس بعد از دامنه را جدا می‌کنیم
+                    path_parts = path.strip('/').split('/')
+                    # اگر اولین پوشه بعد از دامنه یک عدد باشد (مثلاً 23511)، این یک صفحه ویدیو است
+                    if path_parts and path_parts[0].isdigit():
                         video_links.append(full_url)
                         
     except Exception as e:
