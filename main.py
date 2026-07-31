@@ -124,48 +124,111 @@ def get_ydl_impersonate_opts():
         opts['impersonate'] = 'chrome'
     return opts
 
-def scrape_video_links(target_url):
+def scrape_video_links(target_url, history_set, max_pages=20):
+    """
+    استخراج لینک‌ها با قابلیت پیمایش صفحات (Pagination) و توقف هوشمند
+    """
     video_links = []
     target_domain = urlparse(target_url).netloc
+    current_url = target_url
     
-    try:
-        logging.info("در حال ارسال درخواست وب‌سایت با تکنولوژی curl_cffi (تقلید هویت کروم)...")
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-        response = requests_cffi.get(target_url, headers=headers, impersonate="chrome", timeout=20)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+
+    stop_pagination = False
+
+    for page_num in range(1, max_pages + 1):
+        if not current_url or stop_pagination:
+            break
+            
+        logging.info(f"در حال بررسی صفحه {page_num}: {current_url}")
         
-        for video_tag in soup.find_all('video'):
-            src = video_tag.get('src')
-            if src:
-                video_links.append(urljoin(target_url, src))
-            for source in video_tag.find_all('source'):
-                source_src = source.get('src')
-                if source_src:
-                    video_links.append(urljoin(target_url, source_src))
+        try:
+            response = requests_cffi.get(current_url, headers=headers, impersonate="chrome", timeout=20)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            page_links = []
+            
+            # استخراج لینک پست‌ها
+            for a_tag in soup.find_all('a'):
+                href = a_tag.get('href')
+                if href:
+                    full_url = urljoin(current_url, href)
+                    parsed = urlparse(full_url)
+                    path = parsed.path.lower()
                     
-        for a_tag in soup.find_all('a'):
-            href = a_tag.get('href')
-            if href:
-                full_url = urljoin(target_url, href)
-                parsed = urlparse(full_url)
-                path = parsed.path.lower()
+                    if parsed.netloc == target_domain:
+                        path_parts = path.strip('/').split('/')
+                        if path_parts and path_parts[0].isdigit():
+                            page_links.append(full_url)
+            
+            if not page_links:
+                logging.info("هیچ لینک ویدیویی در این صفحه یافت نشد. توقف.")
+                break
+
+            # بررسی هوشمند: آیا کل این صفحه از ویدیوهای تکراری تشکیل شده است؟
+            page_all_duplicates = True
+            for link in page_links:
+                clean_key = get_clean_url_key(link)
+                if clean_key not in history_set:
+                    page_all_duplicates = False
+                    break
+            
+            if page_all_duplicates:
+                logging.info(f"تمام {len(page_links)} ویدیوی صفحه {page_num} قبلاً دانلود شده‌اند. اسکن صفحات قدیمی‌تر متوقف شد.")
+                stop_pagination = True
+            else:
+                video_links.extend(page_links)
+                logging.info(f"{len(page_links)} لینک معتبر در صفحه {page_num} پیدا شد.")
+
+            # پیدا کردن آدرس صفحه بعدی
+            next_page = None
+            
+            # روش ۱: جستجوی دکمه Next در HTML
+            next_link_tag = soup.find('a', rel='next') or \
+                            soup.find('a', class_=re.compile(r'next|pagination', re.I)) or \
+                            soup.find('a', string=re.compile(r'next|بعدی|›|»|older', re.I))
+            
+            if next_link_tag and next_link_tag.get('href'):
+                next_page = urljoin(current_url, next_link_tag['href'])
+            else:
+                # روش ۲: حدس زدن آدرس (مثلاً تغییر /page/1/ به /page/2/)
+                parsed_current = urlparse(current_url)
+                path = parsed_current.path.rstrip('/')
                 
-                video_extensions = ('.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.3gp', '.m3u8')
-                if any(path.endswith(ext) for ext in video_extensions):
-                    video_links.append(full_url)
-                    continue
+                match = re.search(r'/page/(\d+)/?$', path)
+                if match:
+                    current_p_num = int(match.group(1))
+                    next_path = re.sub(r'/page/\d+/?$', f'/page/{current_p_num + 1}/', path)
+                    next_page = urlunparse(parsed_current._replace(path=next_path))
+                else:
+                    if path.endswith('/'):
+                        next_page = urlunparse(parsed_current._replace(path=path + 'page/2/'))
+                    else:
+                        next_page = urlunparse(parsed_current._replace(path=path + '/page/2/'))
+
+            # بررسی وجود صفحه بعدی
+            if next_page:
+                try:
+                    head_resp = requests_cffi.head(next_page, headers=headers, impersonate="chrome", timeout=10, allow_redirects=True)
+                    if head_resp.status_code == 200:
+                        current_url = next_page
+                    else:
+                        logging.info(f"صفحه بعدی یافت نشد (Status: {head_resp.status_code}). پایان.")
+                        break
+                except Exception:
+                    logging.info("خطا در بررسی وجود صفحه بعدی. پایان.")
+                    break
+            else:
+                break
                 
-                if parsed.netloc == target_domain:
-                    path_parts = path.strip('/').split('/')
-                    if path_parts and path_parts[0].isdigit():
-                        video_links.append(full_url)
-                        
-    except Exception as e:
-        logging.error(f"خطا در اسکن اولیه صفحه با BeautifulSoup: {e}")
-        
+        except Exception as e:
+            logging.error(f"خطا در اسکن صفحه {current_url}: {e}")
+            break
+
+    # حذف لینک‌های تکراری در لیست نهایی
     seen = set()
     unique_links = []
     for link in video_links:
@@ -254,17 +317,19 @@ def download_and_process():
     history = load_history()
 
     logging.info(f"در حال بررسی صفحه هدف: {target_url}")
-    scraped_urls = scrape_video_links(target_url)
+    
+    # فراخوانی تابع با قابلیت پیمایش صفحات و عبور دادن تاریخچه برای توقف هوشمند
+    scraped_urls = scrape_video_links(target_url, history, max_pages=10)
     
     if not scraped_urls:
-        logging.warning("هیچ ویدیویی در صفحه مورد نظر یافت نشد.")
+        logging.warning("هیچ ویدیوی جدیدی در صفحات اسکن شده یافت نشد.")
         return
 
     if REVERSE_VIDEO_ORDER:
         logging.info("ترتیب دانلود طبق تنظیمات کاربر معکوس شد.")
         scraped_urls.reverse()
 
-    logging.info(f"تعداد {len(scraped_urls)} لینک ویدیوی منحصر‌به‌فرد یافت شد.")
+    logging.info(f"تعداد {len(scraped_urls)} لینک ویدیوی منحصر‌به‌فرد برای پردازش آماده است.")
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
