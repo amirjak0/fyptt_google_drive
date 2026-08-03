@@ -252,55 +252,6 @@ def extract_post_info(url):
         pass
     return "unknown", "video"
 
-def extract_direct_video_url(post_url, headers):
-    try:
-        response = requests_cffi.get(post_url, headers=headers, impersonate="chrome", timeout=15)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        def find_src_in_soup(s):
-            for v in s.find_all('video'):
-                src = v.get('src')
-                if src: return src
-            for src_tag in s.find_all('source'):
-                src = src_tag.get('src')
-                if src: return src
-            for meta_prop in ['og:video', 'og:video:secure_url', 'og:video:url']:
-                meta = s.find('meta', property=meta_prop)
-                if meta and meta.get('content'):
-                    return meta.get('content')
-            for script in s.find_all('script'):
-                if script.string:
-                    match = re.search(r'file\s*:\s*["\'](https?://[^"\']+\.mp4(?:\?[^"\']*)?)["\']', script.string)
-                    if match:
-                        return match.group(1)
-                    match_generic = re.search(r'["\'](https?://[^"\']+\.mp4(?:\?[^"\']*)?)["\']', script.string)
-                    if match_generic:
-                        return match_generic.group(1)
-            return None
-
-        direct_url = find_src_in_soup(soup)
-        if direct_url:
-            return urljoin(post_url, direct_url)
-            
-        for iframe in soup.find_all('iframe'):
-            src = iframe.get('src')
-            if src and ('fypttstr.php' in src or 'player' in src or 'embed' in src):
-                iframe_url = urljoin(post_url, src)
-                logging.info(f"یافتن فریم ویدیو پلیر: {iframe_url}")
-                
-                iframe_resp = requests_cffi.get(iframe_url, headers=headers, impersonate="chrome", timeout=15)
-                iframe_resp.raise_for_status()
-                iframe_soup = BeautifulSoup(iframe_resp.text, 'html.parser')
-                
-                iframe_video = find_src_in_soup(iframe_soup)
-                if iframe_video:
-                    return urljoin(iframe_url, iframe_video)
-                    
-    except Exception as e:
-        logging.error(f"خطا در استخراج آدرس مستقیم ویدیو از {post_url}: {e}")
-    return None
-
 def download_and_process():
     target_url = os.environ.get("TARGET_SITE_URL")
     folder_id = os.environ.get("GDRIVE_FOLDER_ID")
@@ -380,13 +331,6 @@ def download_and_process():
 
         post_id, post_title = extract_post_info(url)
         logging.info(f"شروع پردازش ویدیوی جدید: [{post_id}] {post_title}")
-        
-        direct_video_url = extract_direct_video_url(url, headers)
-        if not direct_video_url:
-            logging.warning(f"امکان استخراج فایل ویدیو از آدرس {url} وجود نداشت. ویدیو رد شد.")
-            continue
-            
-        logging.info(f"آدرس مستقیم فایل ویدیو با موفقیت استخراج شد: {direct_video_url}")
 
         clean_title = "".join(c for c in post_title if c.isalnum() or c in (' ', '_', '-')).strip()
         clean_title = clean_title[:80]
@@ -404,9 +348,11 @@ def download_and_process():
 
         try:
             with yt_dlp.YoutubeDL(download_opts) as ydl:
-                info = ydl.extract_info(direct_video_url, download=True)
+                # پاس دادن مستقیم آدرس پست به yt-dlp
+                info = ydl.extract_info(url, download=True)
+                
                 if info is None:
-                    logging.warning(f"دانلود ویدیو از آدرس مستقیم {direct_video_url} ناموفق بود.")
+                    logging.warning(f"دانلود ویدیو از آدرس {url} ناموفق بود.")
                     continue
                 
                 duration = info.get('duration')
