@@ -38,14 +38,21 @@ jobs:
           GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           REVERSE_VIDEO_ORDER: ${{ secrets.REVERSE_VIDEO_ORDER || 'False' }}
+          
+          # تنظیمات بخش ترکیبی
+          NEWEST_PAGES_TO_SCAN: '2'    # تعداد صفحات ثابت جدید که در هر بار اجرا اسکن می‌شوند
+          PAGES_PER_RUN: '2'           # تعداد صفحات آرشیو قدیمی متحرک که اسکن و به جلو رانده می‌شوند
+          MAX_DOWNLOADS_PER_RUN: '100' # حداکثر کل ویدیوهایی که در این نوبت دانلود می‌شوند
         run: python main.py
 
-      # گام جدید برای کامیت و ثبت خودکار فایل تاریخچه در مخزن گیت‌هاب شما
+      # گام بروزرسانی‌شده برای کامیت همزمان فایل وضعیت صفحه و فایل تاریخچه
       - name: Commit and Push History to GitHub
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -f download_history.txt ]; then
-            git add download_history.txt
-            git commit -m "Update download history [skip ci]" && git push || echo "هیچ تغییری برای ذخیره در تاریخچه پیدا نشد."
-          fi
+          
+          # تلاش برای افزودن فایل‌ها در صورت وجود
+          git add download_history.txt current_page.txt || true
+          
+          # اجرای دستور کامیت و پوش
+          git commit -m "Update download history and page index [skip ci]" && git push || echo "هیچ تغییری در تاریخچه یا صفحه ثبت نشد."
