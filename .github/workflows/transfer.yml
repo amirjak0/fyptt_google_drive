@@ -45,7 +45,7 @@ jobs:
           MAX_DOWNLOADS_PER_RUN: '100' # حداکثر کل ویدیوهایی که در این نوبت دانلود می‌شوند
         run: python main.py
 
-      # گام بروزرسانی‌شده برای کامیت همزمان فایل وضعیت صفحه و فایل تاریخچه
+      # گام بروزرسانی‌شده برای کامیت دقیق فایل وضعیت صفحه و فایل تاریخچه
       - name: Commit and Push History to GitHub
         run: |
           git config --global user.name "github-actions[bot]"
@@ -54,5 +54,10 @@ jobs:
           # تلاش برای افزودن فایل‌ها در صورت وجود
           git add download_history.txt current_page.txt || true
           
-          # اجرای دستور کامیت و پوش
-          git commit -m "Update download history and page index [skip ci]" && git push || echo "هیچ تغییری در تاریخچه یا صفحه ثبت نشد."
+          # بررسی وجود تغییرات قبل از انجام کامیت جهت جلوگیری از بروز خطای گیت‌هاب اکشن
+          if git diff --staged --quiet; then
+            echo "هیچ تغییری در تاریخچه یا صفحه ثبت نشد."
+          else
+            git commit -m "Update download history and page index [skip ci]"
+            git push
+          fi
