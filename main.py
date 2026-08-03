@@ -21,11 +21,14 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 DOWNLOAD_FOLDER = 'downloads'
-MAX_DOWNLOADS_PER_RUN = 100
 HISTORY_FILE = 'download_history.txt'
+STATE_FILE = 'current_page.txt'
 
-# تنظیم ترتیب دانلود: اگر True باشد، ویدیوها از آخر به اول دانلود می‌شوند.
+# خواندن تنظیمات از متغیرهای محیطی
 REVERSE_VIDEO_ORDER = os.environ.get("REVERSE_VIDEO_ORDER", "False").lower() in ("true", "1", "yes")
+MAX_DOWNLOADS_PER_RUN = int(os.environ.get("MAX_DOWNLOADS_PER_RUN", "100"))
+PAGES_PER_RUN = int(os.environ.get("PAGES_PER_RUN", "2"))
+NEWEST_PAGES_TO_SCAN = int(os.environ.get("NEWEST_PAGES_TO_SCAN", "2"))
 
 def setup_environment():
     if not os.path.exists(DOWNLOAD_FOLDER):
@@ -56,9 +59,6 @@ def get_gdrive_service():
         return None
 
 def load_history():
-    """
-    بارگذاری تاریخچه به صورت محلی از گیت‌هاب
-    """
     history = set()
     if os.path.exists(HISTORY_FILE):
         try:
@@ -67,17 +67,12 @@ def load_history():
                     line = line.strip()
                     if line:
                         history.add(line)
-            logging.info(f"تعداد {len(history)} ویدیو از تاریخچه محلی (گیت‌هاب) بارگذاری شد.")
+            logging.info(f"تعداد {len(history)} ویدیو از تاریخچه محلی بارگذاری شد.")
         except Exception as e:
             logging.error(f"خطا در بارگذاری تاریخچه محلی: {e}")
-    else:
-        logging.info("فایل تاریخچه محلی یافت نشد. یک فایل جدید ایجاد خواهد شد.")
     return history
 
 def save_history(history_set):
-    """
-    ذخیره تاریخچه به صورت محلی برای کامیت شدن در گیت‌هاب
-    """
     try:
         content = "\n".join(sorted(list(history_set)))
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
@@ -85,6 +80,42 @@ def save_history(history_set):
         logging.info("فایل تاریخچه محلی با موفقیت ذخیره شد.")
     except Exception as e:
         logging.error(f"خطا در ذخیره تاریخچه محلی: {e}")
+
+def load_current_page():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                val = f.read().strip()
+                if val.isdigit():
+                    page = int(val)
+                    # اگر مقدار کمتر از ۳ باشد، آن را به ۳ تغییر می‌دهیم، زیرا صفحات ۱ و ۲ همیشه اسکن می‌شوند.
+                    if page < 3:
+                        page = 3
+                    logging.info(f"صفحه شروع قبلی آرشیو یافت شد: {page}")
+                    return page
+        except Exception as e:
+            logging.error(f"خطا در خواندن فایل وضعیت صفحه: {e}")
+    logging.info("فایل وضعیت آرشیو پیدا نشد. شروع آرشیو از صفحه ۳.")
+    return 3
+
+def save_current_page(page):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            f.write(str(page))
+        logging.info(f"صفحه شروع بعدی آرشیو ذخیره شد: {page}")
+    except Exception as e:
+        logging.error(f"خطا در ذخیره فایل وضعیت صفحه: {e}")
+
+def get_page_url(base_url, page_num):
+    if page_num <= 1:
+        return base_url
+    parsed = urlparse(base_url)
+    path = parsed.path.rstrip('/')
+    if re.search(r'/page/\d+$', path):
+        path = re.sub(r'/page/\d+$', f'/page/{page_num}', path)
+    else:
+        path = f"{path}/page/{page_num}/"
+    return urlunparse(parsed._replace(path=path))
 
 def upload_to_gdrive(service, folder_id, file_path):
     logging.info(f"در حال آپلود: {os.path.basename(file_path)}")
@@ -115,43 +146,40 @@ def get_clean_url_key(url):
     except Exception:
         return url
 
-def get_ydl_impersonate_opts():
-    opts = {}
-    try:
-        from yt_dlp.networking.impersonate import ImpersonateTarget
-        opts['impersonate'] = ImpersonateTarget.from_str('chrome')
-    except Exception:
-        opts['impersonate'] = 'chrome'
-    return opts
-
-def scrape_video_links(target_url, history_set, max_pages=20):
+def scrape_video_links(target_url, history_set, start_page=1, pages_to_scan=2):
     """
-    استخراج لینک‌ها با قابلیت پیمایش صفحات (Pagination) و توقف هوشمند
+    استخراج لینک‌ها از محدوده مشخصی از صفحات سایت بدون ارسال درخواست مسدودکننده HEAD
     """
     video_links = []
     target_domain = urlparse(target_url).netloc
-    current_url = target_url
+    current_url = get_page_url(target_url, start_page)
     
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
 
-    stop_pagination = False
+    reached_end = False
+    successful_pages = 0
 
-    for page_num in range(1, max_pages + 1):
-        if not current_url or stop_pagination:
+    for i in range(pages_to_scan):
+        if not current_url:
+            reached_end = True
             break
             
+        page_num = start_page + i
         logging.info(f"در حال بررسی صفحه {page_num}: {current_url}")
         
         try:
             response = requests_cffi.get(current_url, headers=headers, impersonate="chrome", timeout=20)
+            if response.status_code == 404:
+                logging.info(f"صفحه {page_num} وجود ندارد (خطای 404). به پایان سایت رسیدیم.")
+                reached_end = True
+                break
+                
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
             
             page_links = []
-            
-            # استخراج لینک پست‌ها
             for a_tag in soup.find_all('a'):
                 href = a_tag.get('href')
                 if href:
@@ -165,28 +193,16 @@ def scrape_video_links(target_url, history_set, max_pages=20):
                             page_links.append(full_url)
             
             if not page_links:
-                logging.info("هیچ لینک ویدیویی در این صفحه یافت نشد. توقف.")
+                logging.info(f"هیچ لینک ویدیویی در صفحه {page_num} یافت نشد.")
+                reached_end = True
                 break
 
-            # بررسی هوشمند: آیا کل این صفحه از ویدیوهای تکراری تشکیل شده است؟
-            page_all_duplicates = True
-            for link in page_links:
-                clean_key = get_clean_url_key(link)
-                if clean_key not in history_set:
-                    page_all_duplicates = False
-                    break
-            
-            if page_all_duplicates:
-                logging.info(f"تمام {len(page_links)} ویدیوی صفحه {page_num} قبلاً دانلود شده‌اند. اسکن صفحات قدیمی‌تر متوقف شد.")
-                stop_pagination = True
-            else:
-                video_links.extend(page_links)
-                logging.info(f"{len(page_links)} لینک معتبر در صفحه {page_num} پیدا شد.")
+            video_links.extend(page_links)
+            logging.info(f"{len(page_links)} لینک در صفحه {page_num} پیدا شد.")
+            successful_pages += 1
 
             # پیدا کردن آدرس صفحه بعدی
             next_page = None
-            
-            # روش ۱: جستجوی دکمه Next در HTML
             next_link_tag = soup.find('a', rel='next') or \
                             soup.find('a', class_=re.compile(r'next|pagination', re.I)) or \
                             soup.find('a', string=re.compile(r'next|بعدی|›|»|older', re.I))
@@ -194,10 +210,8 @@ def scrape_video_links(target_url, history_set, max_pages=20):
             if next_link_tag and next_link_tag.get('href'):
                 next_page = urljoin(current_url, next_link_tag['href'])
             else:
-                # روش ۲: حدس زدن آدرس (مثلاً تغییر /page/1/ به /page/2/)
                 parsed_current = urlparse(current_url)
                 path = parsed_current.path.rstrip('/')
-                
                 match = re.search(r'/page/(\d+)/?$', path)
                 if match:
                     current_p_num = int(match.group(1))
@@ -209,26 +223,12 @@ def scrape_video_links(target_url, history_set, max_pages=20):
                     else:
                         next_page = urlunparse(parsed_current._replace(path=path + '/page/2/'))
 
-            # بررسی وجود صفحه بعدی
-            if next_page:
-                try:
-                    head_resp = requests_cffi.head(next_page, headers=headers, impersonate="chrome", timeout=10, allow_redirects=True)
-                    if head_resp.status_code == 200:
-                        current_url = next_page
-                    else:
-                        logging.info(f"صفحه بعدی یافت نشد (Status: {head_resp.status_code}). پایان.")
-                        break
-                except Exception:
-                    logging.info("خطا در بررسی وجود صفحه بعدی. پایان.")
-                    break
-            else:
-                break
+            current_url = next_page
                 
         except Exception as e:
             logging.error(f"خطا در اسکن صفحه {current_url}: {e}")
             break
 
-    # حذف لینک‌های تکراری در لیست نهایی
     seen = set()
     unique_links = []
     for link in video_links:
@@ -236,7 +236,7 @@ def scrape_video_links(target_url, history_set, max_pages=20):
             seen.add(link)
             unique_links.append(link)
             
-    return unique_links
+    return unique_links, reached_end, successful_pages
 
 def extract_post_info(url):
     try:
@@ -306,30 +306,61 @@ def download_and_process():
     folder_id = os.environ.get("GDRIVE_FOLDER_ID")
     
     if not target_url or not folder_id:
-        logging.error("آدرس سایت هدف (TARGET_SITE_URL) یا شناسه پوشه گوگل درایو موجود نیست.")
+        logging.error("آدرس سایت هدف یا شناسه پوشه گوگل درایو موجود نیست.")
         return
 
     service = get_gdrive_service()
     if not service:
         return
 
-    # بارگذاری تاریخچه محلی از مخزن گیت‌هاب
+    # بارگذاری فایل تاریخچه ویدیوها
     history = load_history()
 
-    logging.info(f"در حال بررسی صفحه هدف: {target_url}")
+    # ۱. اسکن مداوم جدیدترین ویدیوها (همیشه صفحات ۱ و ۲)
+    logging.info(f"شروع اسکن صفحات جدید روزانه (صفحات ۱ تا {NEWEST_PAGES_TO_SCAN})...")
+    newest_urls, _, _ = scrape_video_links(
+        target_url, 
+        history, 
+        start_page=1, 
+        pages_to_scan=NEWEST_PAGES_TO_SCAN
+    )
+
+    # ۲. اسکن پله‌پله آرشیو قدیمی (بر اساس وضعیت ذخیره شده قبلی)
+    start_page = load_current_page()
+    logging.info(f"شروع اسکن پله‌پله آرشیو قدیمی (شروع از صفحه {start_page} به مدت {PAGES_PER_RUN} صفحه)...")
     
-    # فراخوانی تابع با قابلیت پیمایش صفحات و عبور دادن تاریخچه برای توقف هوشمند
-    scraped_urls = scrape_video_links(target_url, history, max_pages=10)
+    archive_urls, reached_end, successful_pages = scrape_video_links(
+        target_url, 
+        history, 
+        start_page=start_page, 
+        pages_to_scan=PAGES_PER_RUN
+    )
     
-    if not scraped_urls:
-        logging.warning("هیچ ویدیوی جدیدی در صفحات اسکن شده یافت نشد.")
+    # تعیین و ذخیره صفحه شروع بعدی برای اجرای نوبت بعدی
+    if reached_end:
+        logging.info("به انتهای صفحات سایت یا یک صفحه نامعتبر در بخش آرشیو رسیدیم. وضعیت صفحه به ۳ بازنشانی می‌شود.")
+        # بازنشانی به صفحه ۳ (چون صفحات ۱ و ۲ همیشه توسط بخش جدیدترین‌ها لود می‌شوند)
+        save_current_page(3)
+    else:
+        save_current_page(start_page + successful_pages)
+
+    # ادغام لینک‌های یافت شده در هر دو بخش و حذف لینک‌های تکراری مشترک
+    combined_urls = []
+    seen = set()
+    for url in newest_urls + archive_urls:
+        if url not in seen:
+            seen.add(url)
+            combined_urls.append(url)
+
+    if not combined_urls:
+        logging.warning("هیچ ویدیوی جدیدی در صفحات اسکن شده این نوبت یافت نشد.")
         return
 
     if REVERSE_VIDEO_ORDER:
         logging.info("ترتیب دانلود طبق تنظیمات کاربر معکوس شد.")
-        scraped_urls.reverse()
+        combined_urls.reverse()
 
-    logging.info(f"تعداد {len(scraped_urls)} لینک ویدیوی منحصر‌به‌فرد برای پردازش آماده است.")
+    logging.info(f"تعداد {len(combined_urls)} لینک ویدیوی منحصر‌به‌فرد برای پردازش آماده است.")
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -338,14 +369,13 @@ def download_and_process():
     downloaded_count = 0
     history_changed = False
 
-    for url in scraped_urls:
+    for url in combined_urls:
         if downloaded_count >= MAX_DOWNLOADS_PER_RUN:
             logging.info(f"به محدودیت دانلود {MAX_DOWNLOADS_PER_RUN} ویدیو در این نوبت رسیدیم. متوقف شد.")
             break
             
         clean_key = get_clean_url_key(url)
         if clean_key in history:
-            logging.info(f"این ویدیو قبلاً پردازش شده است و نادیده گرفته می‌شود: {clean_key}")
             continue
 
         post_id, post_title = extract_post_info(url)
@@ -412,7 +442,7 @@ def download_and_process():
         except Exception as e:
             logging.error(f"خطا در پردازش ویدیو {url}: {e}")
 
-    # در صورت تغییر تاریخچه، آن را به عنوان یک فایل محلی ذخیره کن
+    # ذخیره فایل دانلودها
     if history_changed:
         save_history(history)
 
