@@ -2,6 +2,7 @@ import os
 import re
 import logging
 import mimetypes
+import hashlib
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 import yt_dlp
@@ -56,9 +57,6 @@ def get_gdrive_service():
         return None
 
 def load_history():
-    """
-    بارگذاری تاریخچه به صورت محلی از گیت‌هاب
-    """
     history = set()
     if os.path.exists(HISTORY_FILE):
         try:
@@ -67,7 +65,7 @@ def load_history():
                     line = line.strip()
                     if line:
                         history.add(line)
-            logging.info(f"تعداد {len(history)} ویدیو از تاریخچه محلی (گیت‌هاب) بارگذاری شد.")
+            logging.info(f"تعداد {len(history)} ویدیو از تاریخچه محلی بارگذاری شد.")
         except Exception as e:
             logging.error(f"خطا در بارگذاری تاریخچه محلی: {e}")
     else:
@@ -75,9 +73,6 @@ def load_history():
     return history
 
 def save_history(history_set):
-    """
-    ذخیره تاریخچه به صورت محلی برای کامیت شدن در گیت‌هاب
-    """
     try:
         content = "\n".join(sorted(list(history_set)))
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
@@ -115,19 +110,7 @@ def get_clean_url_key(url):
     except Exception:
         return url
 
-def get_ydl_impersonate_opts():
-    opts = {}
-    try:
-        from yt_dlp.networking.impersonate import ImpersonateTarget
-        opts['impersonate'] = ImpersonateTarget.from_str('chrome')
-    except Exception:
-        opts['impersonate'] = 'chrome'
-    return opts
-
 def scrape_video_links(target_url, history_set, max_pages=20):
-    """
-    استخراج لینک‌ها با قابلیت پیمایش صفحات (Pagination) و توقف هوشمند
-    """
     video_links = []
     target_domain = urlparse(target_url).netloc
     current_url = target_url
@@ -137,6 +120,13 @@ def scrape_video_links(target_url, history_set, max_pages=20):
     }
 
     stop_pagination = False
+    
+    # کلماتی که در URL نشان‌دهنده صفحات دسته‌بندی یا غیر ویدیویی هستند
+    excluded_paths = {
+        'category', 'niche', 'studios', 'trending', 'hot', 'top', 
+        'upcoming-xxx', 'porn-update-new-porn-videos-todays-scenes', 
+        'pornstars-top', 'page', 'tag', 'dmca', 'iamgettingoutnow', 'amember'
+    }
 
     for page_num in range(1, max_pages + 1):
         if not current_url or stop_pagination:
@@ -151,24 +141,23 @@ def scrape_video_links(target_url, history_set, max_pages=20):
             
             page_links = []
             
-            # استخراج لینک پست‌ها
             for a_tag in soup.find_all('a'):
                 href = a_tag.get('href')
                 if href:
                     full_url = urljoin(current_url, href)
                     parsed = urlparse(full_url)
-                    path = parsed.path.lower()
+                    path = parsed.path.strip('/').lower()
                     
-                    if parsed.netloc == target_domain:
-                        path_parts = path.strip('/').split('/')
-                        if path_parts and path_parts[0].isdigit():
+                    if parsed.netloc == target_domain and path:
+                        path_parts = path.split('/')
+                        # اگر مسیر فقط یک بخش دارد و جزو کلمات ممنوعه نیست، پس صفحه ویدیو است
+                        if len(path_parts) == 1 and path_parts[0] not in excluded_paths:
                             page_links.append(full_url)
             
             if not page_links:
                 logging.info("هیچ لینک ویدیویی در این صفحه یافت نشد. توقف.")
                 break
 
-            # بررسی هوشمند: آیا کل این صفحه از ویدیوهای تکراری تشکیل شده است؟
             page_all_duplicates = True
             for link in page_links:
                 clean_key = get_clean_url_key(link)
@@ -177,16 +166,13 @@ def scrape_video_links(target_url, history_set, max_pages=20):
                     break
             
             if page_all_duplicates:
-                logging.info(f"تمام {len(page_links)} ویدیوی صفحه {page_num} قبلاً دانلود شده‌اند. اسکن صفحات قدیمی‌تر متوقف شد.")
+                logging.info(f"تمام {len(page_links)} ویدیوی صفحه {page_num} قبلاً دانلود شده‌اند. اسکن متوقف شد.")
                 stop_pagination = True
             else:
                 video_links.extend(page_links)
                 logging.info(f"{len(page_links)} لینک معتبر در صفحه {page_num} پیدا شد.")
 
-            # پیدا کردن آدرس صفحه بعدی
             next_page = None
-            
-            # روش ۱: جستجوی دکمه Next در HTML
             next_link_tag = soup.find('a', rel='next') or \
                             soup.find('a', class_=re.compile(r'next|pagination', re.I)) or \
                             soup.find('a', string=re.compile(r'next|بعدی|›|»|older', re.I))
@@ -194,32 +180,24 @@ def scrape_video_links(target_url, history_set, max_pages=20):
             if next_link_tag and next_link_tag.get('href'):
                 next_page = urljoin(current_url, next_link_tag['href'])
             else:
-                # روش ۲: حدس زدن آدرس (مثلاً تغییر /page/1/ به /page/2/)
                 parsed_current = urlparse(current_url)
                 path = parsed_current.path.rstrip('/')
-                
                 match = re.search(r'/page/(\d+)/?$', path)
                 if match:
                     current_p_num = int(match.group(1))
                     next_path = re.sub(r'/page/\d+/?$', f'/page/{current_p_num + 1}/', path)
                     next_page = urlunparse(parsed_current._replace(path=next_path))
                 else:
-                    if path.endswith('/'):
-                        next_page = urlunparse(parsed_current._replace(path=path + 'page/2/'))
-                    else:
-                        next_page = urlunparse(parsed_current._replace(path=path + '/page/2/'))
+                    next_page = urlunparse(parsed_current._replace(path=path + '/page/2/'))
 
-            # بررسی وجود صفحه بعدی
             if next_page:
                 try:
                     head_resp = requests_cffi.head(next_page, headers=headers, impersonate="chrome", timeout=10, allow_redirects=True)
                     if head_resp.status_code == 200:
                         current_url = next_page
                     else:
-                        logging.info(f"صفحه بعدی یافت نشد (Status: {head_resp.status_code}). پایان.")
                         break
                 except Exception:
-                    logging.info("خطا در بررسی وجود صفحه بعدی. پایان.")
                     break
             else:
                 break
@@ -228,7 +206,6 @@ def scrape_video_links(target_url, history_set, max_pages=20):
             logging.error(f"خطا در اسکن صفحه {current_url}: {e}")
             break
 
-    # حذف لینک‌های تکراری در لیست نهایی
     seen = set()
     unique_links = []
     for link in video_links:
@@ -241,12 +218,11 @@ def scrape_video_links(target_url, history_set, max_pages=20):
 def extract_post_info(url):
     try:
         parsed = urlparse(url)
-        path_parts = parsed.path.strip('/').split('/')
-        if path_parts and path_parts[0].isdigit():
-            post_id = path_parts[0]
-            post_title = "video"
-            if len(path_parts) > 1:
-                post_title = path_parts[1].replace('-', ' ').title()
+        path = parsed.path.strip('/')
+        if path:
+            # ساخت یک ID یکتا بر اساس هش آدرس برای جلوگیری از تداخل نام‌ها
+            post_id = hashlib.md5(path.encode()).hexdigest()[:8]
+            post_title = path.replace('-', ' ').title()
             return post_id, post_title
     except Exception:
         pass
@@ -302,7 +278,7 @@ def extract_direct_video_url(post_url, headers):
     return None
 
 def download_and_process():
-    target_url = os.environ.get("TARGET_SITE_URL")
+    target_url = os.environ.get("TARGET_SITE_URL", "https://namethatpornad.com/")
     folder_id = os.environ.get("GDRIVE_FOLDER_ID")
     
     if not target_url or not folder_id:
@@ -313,12 +289,10 @@ def download_and_process():
     if not service:
         return
 
-    # بارگذاری تاریخچه محلی از مخزن گیت‌هاب
     history = load_history()
 
     logging.info(f"در حال بررسی صفحه هدف: {target_url}")
     
-    # فراخوانی تابع با قابلیت پیمایش صفحات و عبور دادن تاریخچه برای توقف هوشمند
     scraped_urls = scrape_video_links(target_url, history, max_pages=10)
     
     if not scraped_urls:
@@ -412,7 +386,6 @@ def download_and_process():
         except Exception as e:
             logging.error(f"خطا در پردازش ویدیو {url}: {e}")
 
-    # در صورت تغییر تاریخچه، آن را به عنوان یک فایل محلی ذخیره کن
     if history_changed:
         save_history(history)
 
