@@ -1,15 +1,14 @@
 import os
-import re
-import sys
 import logging
+import urllib.parse
 from bs4 import BeautifulSoup
+from curl_cffi import requests  # استفاده از curl_cffi برای دور زدن کامل کلودفلر
 import yt_dlp
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-import urllib.parse
 
-# تنظیمات لاگ مشابه خروجی گیت‌هاب شما
+# تنظیمات لاگ
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # دریافت متغیرهای محیطی
@@ -41,101 +40,89 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 def extract_links_from_page(url):
+    """استخراج لینک پست‌ها از صفحات اصلی با شبیه‌سازی مرورگر واقعی"""
     try:
-        # استفاده از curl_cffi برای عبور از کلودفلر و دریافت HTML واقعی صفحه
-        from curl_cffi import requests as curl_requests
-        response = curl_requests.get(url, impersonate="chrome", timeout=20)
-        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        # شبیه‌سازی کامل مرورگر کروم جهت عبور از سیستم‌های ضد ربات
+        response = requests.get(url, headers=headers, impersonate="chrome", timeout=20)
         if response.status_code != 200:
-            logging.error(f"خطا در دریافت صفحه {url} با کد وضعیت: {response.status_code}")
+            logging.error(f"خطا در بارگذاری صفحه {url} با کد وضعیت: {response.status_code}")
             return set()
             
         soup = BeautifulSoup(response.text, 'html.parser')
         links = set()
         
-        domain = urllib.parse.urlparse(url).netloc
-        
-        # ۱. منطق استخراج لینک برای سایت fyptt
-        if "fyptt" in domain:
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                full_url = urllib.parse.urljoin(url, href)
-                path_parts = [p for p in urllib.parse.urlparse(full_url).path.split('/') if p]
-                # در fyptt لینک‌های ویدیو با ساختار عددی شروع می‌شوند مانند /23614/title
-                if len(path_parts) >= 2 and path_parts[0].isdigit():
-                    links.add(full_url)
-                    
-        # ۲. منطق استخراج لینک برای سایت namethatpornad (وردپرسی)
-        else:
-            # استخراج پست‌ها از تگ‌های <article> برای نادیده گرفتن سایدبارها و تبلیغات
-            articles = soup.find_all('article')
-            for article in articles:
-                # روش اول: استخراج از تگ h2 عنوان پست
-                h2 = article.find('h2')
-                if h2:
-                    a = h2.find('a', href=True)
-                    if a:
-                        full_url = urllib.parse.urljoin(url, a['href'])
-                        links.add(full_url)
-                
-                # روش دوم: استخراج از تصویر شاخص
-                thumbnail = article.find('a', class_='featured-thumbnail')
-                if thumbnail and 'href' in thumbnail.attrs:
-                    full_url = urllib.parse.urljoin(url, thumbnail['href'])
-                    # حذف صفحات نامربوط
-                    if not any(x in full_url for x in ['/category/', '/tag/', '/page/', 'wp-', '?']):
-                        links.add(full_url)
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            full_url = urllib.parse.urljoin(url, href)
             
-            # در صورتی که ساختار تغییر کرده باشد (به عنوان زاپاس)
-            if not links:
-                for a in soup.find_all('a', href=True):
-                    href = a['href']
-                    full_url = urllib.parse.urljoin(url, href)
-                    if urllib.parse.urlparse(full_url).netloc == domain:
-                        if not any(x in full_url for x in ['/category/', '/tag/', '/page/', 'wp-', '?', '#']):
-                            path_parts = [p for p in urllib.parse.urlparse(full_url).path.split('/') if p]
-                            if len(path_parts) >= 1:
-                                links.add(full_url)
-                                
+            # فیلتر کردن بخش‌های غیر ویدیو
+            if any(x in full_url for x in ['/category/', '/tag/', '/page/', '?', '/about', '/contact', '/feed/', '/search/']):
+                continue
+                
+            # اطمینان از اینکه لینک داخلی است و مربوط به صفحه اصلی نیست
+            if urllib.parse.urlparse(full_url).netloc == urllib.parse.urlparse(url).netloc:
+                path = urllib.parse.urlparse(full_url).path.strip('/')
+                path_parts = [p for p in path.split('/') if p]
+                if len(path_parts) >= 1:
+                    if full_url.rstrip('/') != url.rstrip('/'):
+                        links.add(full_url)
+                        
         return links
     except Exception as e:
         logging.error(f"خطا در استخراج لینک از {url}: {e}")
         return set()
 
-def get_direct_video_url_and_id(link):
-    # این تابع آدرس ویدیو را بررسی کرده و در صورت نیاز لینک آی‌فریم پلیر را برای دانلود تمیز می‌کند
+def extract_video_sources_from_post(post_url):
+    """کاویدن کدهای خام صفحه پست جهت پیدا کردن پلیر اصلی و عبور از تبلیغات کلیکی"""
     try:
-        from curl_cffi import requests as curl_requests
-        video_id = urllib.parse.urlparse(link).path.strip('/')
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(post_url, headers=headers, impersonate="chrome", timeout=20)
+        if response.status_code != 200:
+            return []
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        video_urls = []
         
-        if "fyptt" in link:
-            res = curl_requests.get(link, impersonate="chrome", timeout=15)
-            soup = BeautifulSoup(res.text, 'html.parser')
-            iframe = soup.find('iframe', src=True)
-            if iframe and "fypttstr.php" in iframe['src']:
-                iframe_url = urllib.parse.urljoin(link, iframe['src'])
-                logging.info(f"یافتن فریم ویدیو پلیر: {iframe_url}")
+        # ۱. پیدا کردن تمام آی‌فریم‌های پلیر پنهان (تگ Iframe)
+        for iframe in soup.find_all('iframe', src=True):
+            src = iframe['src']
+            full_src = urllib.parse.urljoin(post_url, src)
+            # رد کردن آی‌فریم‌های تبلیغاتی معروف یا شبکه‌های اجتماعی
+            if any(x in full_src for x in ['doubleclick', 'google', 'facebook', 'twitter', 'disqus', 'ads', 'exoclick']):
+                continue
+            video_urls.append(full_src)
+            
+        # ۲. پیدا کردن تگ‌های مستقیم ویدیو در صورت وجود
+        for video in soup.find_all('video'):
+            if video.get('src'):
+                video_urls.append(urllib.parse.urljoin(post_url, video['src']))
+            for source in video.find_all('source', src=True):
+                video_urls.append(urllib.parse.urljoin(post_url, source['src']))
                 
-                # دریافت صفحه فریم مستقیم ویدیو
-                res_iframe = curl_requests.get(iframe_url, impersonate="chrome", timeout=15)
-                # جستجوی آدرس مستقیم فایل mp4 در سورس فریم
-                mp4_match = re.search(r'https?://[^\s"\']+\.mp4\?[^\s"\']+', res_iframe.text)
-                if mp4_match:
-                    direct_url = mp4_match.group(0)
-                    logging.info(f"آدرس مستقیم فایل ویدیو با موفقیت استخراج شد: {direct_url}")
-                    return direct_url, video_id
-                return iframe_url, video_id
+        # ۳. پیدا کردن لینک‌های ارجاع به سایت‌های میزبان ویدیو معروف
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            full_href = urllib.parse.urljoin(post_url, href)
+            if any(ext in full_href.lower() for ext in ['.mp4', '.m3u8', '.webm']):
+                video_urls.append(full_href)
+            elif any(tube in full_href.lower() for tube in ['pornhub.com', 'spankbang.com', 'xhamster.com', 'eporner.com', 'redtube.com', 'youporn.com', 'xvvideos.com']):
+                video_urls.append(full_href)
                 
-        return link, video_id
+        return list(set(video_urls))
     except Exception as e:
-        logging.error(f"خطا در استخراج پلیر: {e}")
-        return link, urllib.parse.urlparse(link).path.strip('/')
+        logging.error(f"خطا در استخراج منابع ویدیو از پست {post_url}: {e}")
+        return []
 
 def process_site(base_url, history, drive_service):
     logging.info(f"در حال بررسی سایت: {base_url}")
     all_links = set()
     
-    # بررسی ۱۰ صفحه اول
+    # اسکن صفحات اول برای یافتن ویدیوهای جدید
     for page in range(1, 11):
         if "fyptt" in base_url:
             page_url = f"{base_url.rstrip('/')}/page/{page}/?0"
@@ -148,63 +135,71 @@ def process_site(base_url, history, drive_service):
         logging.info(f"{len(links)} لینک معتبر در صفحه {page} پیدا شد.")
 
     logging.info(f"تعداد کل {len(all_links)} لینک برای پردازش آماده است.")
-
     os.makedirs('downloads', exist_ok=True)
 
     for link in all_links:
-        direct_url, video_id = get_direct_video_url_and_id(link)
-        
+        # استفاده از پسوند آدرس به عنوان شناسه تاریخچه برای جلوگیری از تکرار
+        video_id = urllib.parse.urlparse(link).path.strip('/')
         if not video_id or video_id in history:
             continue
             
-        logging.info(f"شروع پردازش ویدیوی جدید: {video_id}")
+        logging.info(f"شروع پردازش ویدیوی جدید: {link}")
         
-        # تنظیمات کیفیت بالا برای دانلود ویدیو از طریق yt-dlp
-        ydl_opts = {
-            'format': 'bestvideo+bestaudio/best', # بالاترین کیفیت موجود ویدیو و صدا
-            'outtmpl': 'downloads/%(title)s [%(id)s].%(ext)s',
-            'ignoreerrors': True,
-            'quiet': True,
-            'no_warnings': True,
-            'restrictfilenames': True,
-            'impersonate': 'chrome' # استفاده از شبیه‌ساز کروم برای دانلود از هاست ویدیوها
-        }
-        
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(direct_url, download=True)
-                if not info:
-                    logging.warning(f"امکان دانلود ویدیو وجود نداشت. آدرس ویدیو رد شد.")
-                    continue
+        # استخراج منابع اصلی ویدیو از پست
+        video_sources = extract_video_sources_from_post(link)
+        if not video_sources:
+            # اگر هیچ منبع خاصی یافت نشد، خود لینک پست را به عنوان بکاپ به yt-dlp می‌دهیم
+            video_sources = [link]
+            
+        for source in video_sources:
+            logging.info(f"در حال دانلود از منبع استخراج‌شده: {source}")
+            
+            # تنظیمات دانلود برای دریافت بالاترین کیفیت تصویر و صدا
+            ydl_opts = {
+                'format': 'bestvideo+bestaudio/best', # تضمین دانلود بالاترین کیفیت موجود
+                'outtmpl': 'downloads/%(title)s [%(id)s].%(ext)s',
+                'ignoreerrors': True,
+                'quiet': False,
+                'no_warnings': True,
+                'restrictfilenames': True,
+                'impersonate': 'chrome' # دور زدن کلودفلر پلتفرم‌های میزبان
+            }
+            
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(source, download=True)
+                    if not info:
+                        continue
+                        
+                    filename = ydl.prepare_filename(info)
                     
-                filename = ydl.prepare_filename(info)
-                
-                # بررسی تغییر پسوند احتمالی (مثلاً mkv یا webm)
-                if not os.path.exists(filename):
-                    base, _ = os.path.splitext(filename)
-                    for ext in ['.mp4', '.mkv', '.webm']:
-                        if os.path.exists(base + ext):
-                            filename = base + ext
-                            break
-                            
-                if os.path.exists(filename):
-                    logging.info(f"در حال آپلود: {os.path.basename(filename)}")
-                    file_metadata = {'name': os.path.basename(filename), 'parents': [GDRIVE_FOLDER_ID]}
-                    media = MediaFileUpload(filename, resumable=True)
-                    uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-                    logging.info(f"آپلود موفقیت‌آمیز بود. شناسه فایل: {uploaded_file.get('id')}")
-                    
-                    os.remove(filename)
-                    logging.info("فایل محلی از روی سرور حذف شد.")
-                    
-                    save_history(video_id)
-                    history.add(video_id)
-        except Exception as e:
-            logging.error(f"خطا در پردازش {link}: {e}")
+                    # مدیریت تغییر احتمالی فرمت خروجی (مانند mkv یا webm)
+                    if not os.path.exists(filename):
+                        base, _ = os.path.splitext(filename)
+                        for ext in ['.mp4', '.mkv', '.webm']:
+                            if os.path.exists(base + ext):
+                                filename = base + ext
+                                break
+                                
+                    if os.path.exists(filename):
+                        logging.info(f"در حال آپلود به گوگل درایو: {os.path.basename(filename)}")
+                        file_metadata = {'name': os.path.basename(filename), 'parents': [GDRIVE_FOLDER_ID]}
+                        media = MediaFileUpload(filename, resumable=True)
+                        uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                        logging.info(f"آپلود موفقیت‌آمیز بود. شناسه فایل: {uploaded_file.get('id')}")
+                        
+                        os.remove(filename)
+                        logging.info("فایل موقت محلی حذف شد.")
+                        
+                        save_history(video_id)
+                        history.add(video_id)
+                        break # با موفقیت دانلود شد، به سراغ لینک بعدی می‌رویم
+            except Exception as e:
+                logging.error(f"خطا در دانلود یا آپلود منبع {source}: {e}")
 
 def main():
     history = load_history()
-    logging.info(f"تعداد {len(history)} ویدیو از تاریخچه محلی (گیت‌هاب) بارگذاری شد.")
+    logging.info(f"تعداد {len(history)} ویدیو از تاریخچه دانلودهای قبلی بارگذاری شد.")
     
     drive_service = get_drive_service()
     
