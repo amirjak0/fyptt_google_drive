@@ -123,6 +123,7 @@ def scrape_video_links(target_url, history_set, max_pages=20):
 
     stop_pagination = False
     
+    # کلمات ممنوعه برای جلوگیری از دانلود صفحات دسته‌بندی
     excluded_paths = {
         'category', 'niche', 'studios', 'trending', 'hot', 'top', 
         'upcoming-xxx', 'porn-update-new-porn-videos-todays-scenes', 
@@ -151,7 +152,12 @@ def scrape_video_links(target_url, history_set, max_pages=20):
                     
                     if parsed.netloc == target_domain and path:
                         path_parts = path.split('/')
-                        if len(path_parts) == 1 and path_parts[0] not in excluded_paths:
+                        
+                        # پشتیبانی همزمان از fyptt.to و namethatpornad.com
+                        is_fyptt_style = path_parts[0].isdigit()
+                        is_namethatporn_style = (len(path_parts) == 1 and path_parts[0] not in excluded_paths)
+                        
+                        if is_fyptt_style or is_namethatporn_style:
                             page_links.append(full_url)
             
             if not page_links:
@@ -220,9 +226,17 @@ def extract_post_info(url):
         parsed = urlparse(url)
         path = parsed.path.strip('/')
         if path:
-            post_id = hashlib.md5(path.encode()).hexdigest()[:8]
-            post_title = path.replace('-', ' ').title()
-            return post_id, post_title
+            path_parts = path.split('/')
+            # اگر سایت fyptt.to باشد (شروع با عدد)
+            if path_parts[0].isdigit():
+                post_id = path_parts[0]
+                post_title = path_parts[1].replace('-', ' ').title() if len(path_parts) > 1 else "video"
+                return post_id, post_title
+            # اگر سایت namethatpornad.com باشد (بدون عدد)
+            else:
+                post_id = hashlib.md5(path.encode()).hexdigest()[:8]
+                post_title = path.replace('-', ' ').title()
+                return post_id, post_title
     except Exception:
         pass
     return "unknown", "post"
@@ -365,7 +379,6 @@ def download_and_process():
                             expected_path = ydl.prepare_filename(info)
                             file_path = expected_path
                             
-                            # پیدا کردن فایل نهایی (گاهی فرمت بعد از ادغام تغییر میکند)
                             if not os.path.exists(file_path):
                                 base_path = os.path.splitext(expected_path)[0]
                                 for ext in ['mp4', 'mkv', 'webm', 'avi']:
@@ -386,7 +399,6 @@ def download_and_process():
 
         # --- پردازش تصاویر متحرک ---
         for idx, img_url in enumerate(animated_images):
-            # بررسی مجدد محدودیت حجم قبل از دانلود هر عکس
             if total_downloaded_bytes >= MAX_DOWNLOAD_BYTES:
                 logging.info("حجم دانلود به سقف ۲ گیگابایت رسید. توقف دانلود تصاویر.")
                 break
@@ -397,7 +409,7 @@ def download_and_process():
                 
             ext = img_url.split('.')[-1].split('?')[0]
             if ext.lower() not in ['gif', 'webp']:
-                ext = 'gif' # پیش‌فرض
+                ext = 'gif'
                 
             img_filename = f"{clean_title} [{post_id}]_anim_{idx}.{ext}"
             img_filepath = os.path.join(DOWNLOAD_FOLDER, img_filename)
