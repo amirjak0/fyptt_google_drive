@@ -1,6 +1,7 @@
 import os
+import re
+import sys
 import logging
-import requests
 from bs4 import BeautifulSoup
 import yt_dlp
 from google.oauth2.credentials import Credentials
@@ -12,7 +13,6 @@ import urllib.parse
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # دریافت متغیرهای محیطی
-# با استفاده از split پشتیبانی از چند سایت که با کاما جدا شده‌اند اضافه شد
 TARGET_SITE_URLS = os.getenv('TARGET_SITE_URL', '').split(',')
 GDRIVE_CLIENT_ID = os.getenv('GDRIVE_CLIENT_ID')
 GDRIVE_CLIENT_SECRET = os.getenv('GDRIVE_CLIENT_SECRET')
@@ -42,36 +42,101 @@ def get_drive_service():
 
 def extract_links_from_page(url):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=15)
+        # استفاده از curl_cffi برای عبور از کلودفلر و دریافت HTML واقعی صفحه
+        from curl_cffi import requests as curl_requests
+        response = curl_requests.get(url, impersonate="chrome", timeout=20)
+        
+        if response.status_code != 200:
+            logging.error(f"خطا در دریافت صفحه {url} با کد وضعیت: {response.status_code}")
+            return set()
+            
         soup = BeautifulSoup(response.text, 'html.parser')
         links = set()
         
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            full_url = urllib.parse.urljoin(url, href)
-            
-            # فیلتر کردن لینک‌های نامربوط (دسته‌بندی‌ها، صفحات، تگ‌ها و ...)
-            if any(x in full_url for x in ['/category/', '/tag/', '/page/', '?', '/about', '/contact']):
-                continue
-                
-            # بررسی اینکه لینک متعلق به همان دامنه باشد و ساختار یک پست/ویدیو را داشته باشد
-            if urllib.parse.urlparse(full_url).netloc == urllib.parse.urlparse(url).netloc:
-                path_parts = [p for p in full_url.split('/') if p]
-                if len(path_parts) >= 2: # معمولا لینک ویدیوها طولانی‌تر از صفحه اصلی هستند
+        domain = urllib.parse.urlparse(url).netloc
+        
+        # ۱. منطق استخراج لینک برای سایت fyptt
+        if "fyptt" in domain:
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                full_url = urllib.parse.urljoin(url, href)
+                path_parts = [p for p in urllib.parse.urlparse(full_url).path.split('/') if p]
+                # در fyptt لینک‌های ویدیو با ساختار عددی شروع می‌شوند مانند /23614/title
+                if len(path_parts) >= 2 and path_parts[0].isdigit():
                     links.add(full_url)
+                    
+        # ۲. منطق استخراج لینک برای سایت namethatpornad (وردپرسی)
+        else:
+            # استخراج پست‌ها از تگ‌های <article> برای نادیده گرفتن سایدبارها و تبلیغات
+            articles = soup.find_all('article')
+            for article in articles:
+                # روش اول: استخراج از تگ h2 عنوان پست
+                h2 = article.find('h2')
+                if h2:
+                    a = h2.find('a', href=True)
+                    if a:
+                        full_url = urllib.parse.urljoin(url, a['href'])
+                        links.add(full_url)
+                
+                # روش دوم: استخراج از تصویر شاخص
+                thumbnail = article.find('a', class_='featured-thumbnail')
+                if thumbnail and 'href' in thumbnail.attrs:
+                    full_url = urllib.parse.urljoin(url, thumbnail['href'])
+                    # حذف صفحات نامربوط
+                    if not any(x in full_url for x in ['/category/', '/tag/', '/page/', 'wp-', '?']):
+                        links.add(full_url)
+            
+            # در صورتی که ساختار تغییر کرده باشد (به عنوان زاپاس)
+            if not links:
+                for a in soup.find_all('a', href=True):
+                    href = a['href']
+                    full_url = urllib.parse.urljoin(url, href)
+                    if urllib.parse.urlparse(full_url).netloc == domain:
+                        if not any(x in full_url for x in ['/category/', '/tag/', '/page/', 'wp-', '?', '#']):
+                            path_parts = [p for p in urllib.parse.urlparse(full_url).path.split('/') if p]
+                            if len(path_parts) >= 1:
+                                links.add(full_url)
+                                
         return links
     except Exception as e:
         logging.error(f"خطا در استخراج لینک از {url}: {e}")
         return set()
 
+def get_direct_video_url_and_id(link):
+    # این تابع آدرس ویدیو را بررسی کرده و در صورت نیاز لینک آی‌فریم پلیر را برای دانلود تمیز می‌کند
+    try:
+        from curl_cffi import requests as curl_requests
+        video_id = urllib.parse.urlparse(link).path.strip('/')
+        
+        if "fyptt" in link:
+            res = curl_requests.get(link, impersonate="chrome", timeout=15)
+            soup = BeautifulSoup(res.text, 'html.parser')
+            iframe = soup.find('iframe', src=True)
+            if iframe and "fypttstr.php" in iframe['src']:
+                iframe_url = urllib.parse.urljoin(link, iframe['src'])
+                logging.info(f"یافتن فریم ویدیو پلیر: {iframe_url}")
+                
+                # دریافت صفحه فریم مستقیم ویدیو
+                res_iframe = curl_requests.get(iframe_url, impersonate="chrome", timeout=15)
+                # جستجوی آدرس مستقیم فایل mp4 در سورس فریم
+                mp4_match = re.search(r'https?://[^\s"\']+\.mp4\?[^\s"\']+', res_iframe.text)
+                if mp4_match:
+                    direct_url = mp4_match.group(0)
+                    logging.info(f"آدرس مستقیم فایل ویدیو با موفقیت استخراج شد: {direct_url}")
+                    return direct_url, video_id
+                return iframe_url, video_id
+                
+        return link, video_id
+    except Exception as e:
+        logging.error(f"خطا در استخراج پلیر: {e}")
+        return link, urllib.parse.urlparse(link).path.strip('/')
+
 def process_site(base_url, history, drive_service):
     logging.info(f"در حال بررسی سایت: {base_url}")
     all_links = set()
     
-    # بررسی 10 صفحه اول سایت
+    # بررسی ۱۰ صفحه اول
     for page in range(1, 11):
-        # تنظیم ساختار URL صفحات بر اساس نوع سایت
         if "fyptt" in base_url:
             page_url = f"{base_url.rstrip('/')}/page/{page}/?0"
         else:
@@ -82,39 +147,39 @@ def process_site(base_url, history, drive_service):
         all_links.update(links)
         logging.info(f"{len(links)} لینک معتبر در صفحه {page} پیدا شد.")
 
-    logging.info(f"تعداد کل {len(all_links)} لینک برای پردازش از این سایت آماده است.")
+    logging.info(f"تعداد کل {len(all_links)} لینک برای پردازش آماده است.")
 
     os.makedirs('downloads', exist_ok=True)
 
     for link in all_links:
-        # استفاده از مسیر URL به عنوان شناسه یکتا برای جلوگیری از دانلود تکراری
-        video_id = urllib.parse.urlparse(link).path.strip('/')
+        direct_url, video_id = get_direct_video_url_and_id(link)
+        
         if not video_id or video_id in history:
             continue
             
-        logging.info(f"شروع پردازش ویدیوی جدید: {link}")
+        logging.info(f"شروع پردازش ویدیوی جدید: {video_id}")
         
-        # تنظیمات yt-dlp برای بالاترین کیفیت و دور زدن محدودیت‌ها
+        # تنظیمات کیفیت بالا برای دانلود ویدیو از طریق yt-dlp
         ydl_opts = {
-            'format': 'bestvideo+bestaudio/best', # دانلود بالاترین کیفیت ممکن
+            'format': 'bestvideo+bestaudio/best', # بالاترین کیفیت موجود ویدیو و صدا
             'outtmpl': 'downloads/%(title)s [%(id)s].%(ext)s',
             'ignoreerrors': True,
             'quiet': True,
             'no_warnings': True,
             'restrictfilenames': True,
-            'impersonate': 'chrome' # استفاده از curl_cffi برای دور زدن کلودفلر و آنتی‌بات‌ها
+            'impersonate': 'chrome' # استفاده از شبیه‌ساز کروم برای دانلود از هاست ویدیوها
         }
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(link, download=True)
+                info = ydl.extract_info(direct_url, download=True)
                 if not info:
-                    logging.warning(f"امکان استخراج فایل ویدیو از آدرس {link} وجود نداشت. ویدیو رد شد.")
+                    logging.warning(f"امکان دانلود ویدیو وجود نداشت. آدرس ویدیو رد شد.")
                     continue
                     
                 filename = ydl.prepare_filename(info)
                 
-                # بررسی تغییر پسوند فایل توسط yt-dlp (مثلا ادغام صدا و تصویر در mkv)
+                # بررسی تغییر پسوند احتمالی (مثلاً mkv یا webm)
                 if not os.path.exists(filename):
                     base, _ = os.path.splitext(filename)
                     for ext in ['.mp4', '.mkv', '.webm']:
