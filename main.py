@@ -1,48 +1,99 @@
 import os
+import sys
 import re
 import logging
 import mimetypes
-import hashlib
-from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
+from bs4 import BeautifulSoup
+
+# استفاده از curl_cffi برای دور زدن کلودفلر و فایروال‌ها
+try:
+    from curl_cffi import requests as requests_cffi
+except ImportError:
+    import requests as requests_cffi
+
 import yt_dlp
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.auth.transport.requests import Request
 
-# وارد کردن کتابخانه curl_cffi برای دور زدن سیستم کلودفلر
-try:
-    from curl_cffi import requests as requests_cffi
-except ImportError:
-    logging.warning("کتابخانه curl_cffi نصب نیست. ممکن است با خطای 403 مواجه شوید.")
-    import requests as requests_cffi
-
 # تنظیمات لاگ‌گیری
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - [%(levelname)s] - %(message)s'
+)
 
-DOWNLOAD_FOLDER = 'downloads'
 HISTORY_FILE = 'download_history.txt'
+DOWNLOAD_DIR = 'downloads'
 
-# محدودیت دانلود: 2 گیگابایت (به بایت)
-MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024 
+DEFAULT_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+}
 
-# تنظیم ترتیب دانلود: اگر True باشد، ویدیوها از آخر به اول دانلود می‌شوند.
-REVERSE_VIDEO_ORDER = os.environ.get("REVERSE_VIDEO_ORDER", "False").lower() in ("true", "1", "yes")
+# کلمات کلیدی دسته‌بندی‌ها و سربرگ‌ها
+TAB_KEYWORDS = [
+    'trending', 'hot', 'top', 'upcoming', 'porn-update', 
+    'pornstars', 'new', 'studios', 'niche', 'category', 'tag'
+]
 
-def setup_environment():
-    if not os.path.exists(DOWNLOAD_FOLDER):
-        os.makedirs(DOWNLOAD_FOLDER)
+# دامنه‌ها و لینک‌های نامربوط که باید فیلتر شوند
+IGNORED_DOMAINS = [
+    'segpay.com', 'epoch.com', 'psmhelp.com', 'mlfhelp.com',
+    'paperstreetcash.com', 'auth.reptyle.com', 'ccbill.com',
+    'verotel.com', 'probiller.com', 'google.com', 'twitter.com', 'facebook.com'
+]
 
-def get_gdrive_service():
-    client_id = os.environ.get("GDRIVE_CLIENT_ID")
-    client_secret = os.environ.get("GDRIVE_CLIENT_SECRET")
-    refresh_token = os.environ.get("GDRIVE_REFRESH_TOKEN")
-    
+IGNORED_KEYWORDS = [
+    'billingsupport', 'section2257', 'tos', 'privacy', 'refund',
+    'faq', 'technicalsupport', 'content-removal', 'complaints',
+    'dmca', 'anti-trafficking', 'cookie-policy', 'login', 'oauth',
+    'join', 'signup', 'affiliate', 'amember', 'iamgettingoutnow'
+]
+
+def load_history():
+    """خواندن لیست لینک‌هایی که قبلاً دانلود شده‌اند"""
+    history = set()
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        history.add(line)
+            logging.info(f"تعداد {len(history)} آیتم در تاریخچه قبلی یافت شد.")
+        except Exception as e:
+            logging.error(f"خطا در خواندن تاریخچه: {e}")
+    return history
+
+def save_to_history(url):
+    """ذخیره لینک تمیز در فایل تاریخچه"""
+    clean_url = get_clean_url_key(url)
+    try:
+        with open(HISTORY_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"{clean_url}\n")
+    except Exception as e:
+        logging.error(f"خطا در ذخیره تاریخچه برای {url}: {e}")
+
+def get_clean_url_key(url):
+    """حذف پارامترهای موقت مانند توکن، امضا و زمان انقضا برای جلوگیری از تکرار"""
+    try:
+        parsed = urlparse(url)
+        query_params = parse_qsl(parsed.query)
+        ignored_keys = {'token', 'expires', 'signature', 'sig', 'hash', 'auth', 'time', 't', 'session', 'session_id'}
+        clean_params = [(k, v) for k, v in query_params if k.lower() not in ignored_keys]
+        clean_query = urlencode(clean_params)
+        return urlunparse(parsed._replace(query=clean_query, fragment=''))
+    except Exception:
+        return url
+
+def get_gdrive_service(client_id, client_secret, refresh_token):
+    """اتصال به Google Drive API"""
     if not all([client_id, client_secret, refresh_token]):
-        logging.error("اطلاعات اتصال به گوگل درایو در متغیرهای محیطی یافت نشد.")
+        logging.error("کلیدهای اتصال به گوگل درایو یافت نشدند.")
         return None
-
     try:
         creds = Credentials(
             token=None,
@@ -51,391 +102,306 @@ def get_gdrive_service():
             client_id=client_id,
             client_secret=client_secret
         )
-        creds.refresh(Request())
-        service = build('drive', 'v3', credentials=creds)
-        return service
+        if creds.expired or not creds.valid:
+            creds.refresh(Request())
+        return build('drive', 'v3', credentials=creds)
     except Exception as e:
-        logging.error(f"خطا در اتصال به گوگل درایو: {e}")
+        logging.error(f"خطا در اتصال به Google Drive: {e}")
         return None
 
-def load_history():
-    history = set()
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        history.add(line)
-            logging.info(f"تعداد {len(history)} آیتم از تاریخچه محلی بارگذاری شد.")
-        except Exception as e:
-            logging.error(f"خطا در بارگذاری تاریخچه محلی: {e}")
-    else:
-        logging.info("فایل تاریخچه محلی یافت نشد. یک فایل جدید ایجاد خواهد شد.")
-    return history
-
-def save_history(history_set):
+def upload_to_gdrive(service, file_path, folder_id):
+    """آپلود فایل دانلود شده به گوگل درایو"""
     try:
-        content = "\n".join(sorted(list(history_set)))
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            f.write(content)
-        logging.info("فایل تاریخچه محلی با موفقیت ذخیره شد.")
-    except Exception as e:
-        logging.error(f"خطا در ذخیره تاریخچه محلی: {e}")
-
-def upload_to_gdrive(service, folder_id, file_path):
-    logging.info(f"در حال آپلود: {os.path.basename(file_path)}")
-    try:
-        file_metadata = {'name': os.path.basename(file_path), 'parents': [folder_id]}
+        file_name = os.path.basename(file_path)
+        file_metadata = {
+            'name': file_name,
+            'parents': [folder_id] if folder_id else []
+        }
         mime_type, _ = mimetypes.guess_type(file_path)
-        if mime_type is None:
-            mime_type = 'application/octet-stream'
-            
+        if not mime_type:
+            mime_type = 'video/mp4' if file_path.endswith('.mp4') else 'application/octet-stream'
+
         media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
-        file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        logging.info(f"آپلود موفقیت‌آمیز بود. شناسه فایل: {file.get('id')}")
+        uploaded = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, name'
+        ).execute()
+        logging.info(f"✅ فایل با موفقیت در گوگل درایو ذخیره شد (ID: {uploaded.get('id')})")
         return True
     except Exception as e:
-        logging.error(f"خطا در آپلود به گوگل درایو: {e}")
+        logging.error(f"❌ خطا در آپلود به گوگل درایو: {e}")
         return False
 
-def get_clean_url_key(url):
-    try:
-        parsed = urlparse(url)
-        query_params = parse_qsl(parsed.query)
-        ignored_keys = {'token', 'expires', 'signature', 'sig', 'hash', 'auth', 'time', 't', 'session', 'session_id'}
-        clean_params = [(k, v) for k, v in query_params if k.lower() not in ignored_keys]
-        
-        clean_query = urlencode(clean_params)
-        clean_parsed = parsed._replace(query=clean_query, fragment='')
-        return urlunparse(clean_parsed)
-    except Exception:
-        return url
+def is_ignored_url(url):
+    """بررسی لینک‌های نامربوط یا تبلیغاتی"""
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if any(ig_dom in domain for ig_dom in IGNORED_DOMAINS):
+        return True
+    if any(ig_kw in path for ig_kw in IGNORED_KEYWORDS):
+        return True
+    return False
 
-def scrape_video_links(target_url, history_set, max_pages=20):
-    video_links = []
-    target_domain = urlparse(target_url).netloc
-    current_url = target_url
+def is_tab_or_listing(url):
+    """تشخیص صفحات دسته‌بندی و لیست‌ها"""
+    clean_url = url.lower().split('?')[0].rstrip('/')
+    return any(keyword in clean_url for keyword in TAB_KEYWORDS) or '/page/' in clean_url
+
+def find_all_video_srcs(soup, base_url):
+    """استخراج تمام سورس‌های ویدیویی (MP4, M3U8, WEBM) از HTML"""
+    found_urls = set()
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
+    # 1. تگ‌های video و audio
+    for v in soup.find_all(['video', 'audio']):
+        for attr in ['src', 'data-src', 'data-video', 'data-url', 'data-orig']:
+            src = v.get(attr)
+            if src and not src.startswith('blob:'):
+                found_urls.add(urljoin(base_url, src))
+        for src_tag in v.find_all('source'):
+            for attr in ['src', 'data-src']:
+                src = src_tag.get(attr)
+                if src and not src.startswith('blob:'):
+                    found_urls.add(urljoin(base_url, src))
 
-    stop_pagination = False
-    
-    excluded_paths = {
-        'category', 'niche', 'studios', 'trending', 'hot', 'top', 
-        'upcoming-xxx', 'porn-update-new-porn-videos-todays-scenes', 
-        'pornstars-top', 'page', 'tag', 'dmca', 'iamgettingoutnow', 'amember'
-    }
+    # 2. تگ‌های source مستقل
+    for src_tag in soup.find_all('source'):
+        src = src_tag.get('src') or src_tag.get('data-src')
+        if src and not src.startswith('blob:'):
+            found_urls.add(urljoin(base_url, src))
 
-    for page_num in range(1, max_pages + 1):
-        if not current_url or stop_pagination:
-            break
-            
-        logging.info(f"در حال بررسی صفحه {page_num}: {current_url}")
-        
-        try:
-            response = requests_cffi.get(current_url, headers=headers, impersonate="chrome", timeout=20)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            page_links = []
-            
-            for a_tag in soup.find_all('a'):
-                href = a_tag.get('href')
-                if href:
-                    full_url = urljoin(current_url, href)
-                    parsed = urlparse(full_url)
-                    path = parsed.path.strip('/').lower()
-                    
-                    if parsed.netloc == target_domain and path:
-                        path_parts = path.split('/')
-                        
-                        is_fyptt_style = path_parts[0].isdigit()
-                        is_namethatporn_style = (len(path_parts) == 1 and path_parts[0] not in excluded_paths)
-                        
-                        if is_fyptt_style or is_namethatporn_style:
-                            page_links.append(full_url)
-            
-            if not page_links:
-                logging.info("هیچ لینک پستی در این صفحه یافت نشد. توقف.")
-                break
+    # 3. متاتگ‌ها
+    for meta in soup.find_all('meta'):
+        prop = meta.get('property', '') or meta.get('name', '')
+        if any(x in prop.lower() for x in ['og:video', 'og:video:url', 'og:video:secure_url', 'twitter:player:stream', 'video:url']):
+            content = meta.get('content')
+            if content and not content.startswith('blob:'):
+                found_urls.add(urljoin(base_url, content))
 
-            page_all_duplicates = True
-            for link in page_links:
-                clean_key = get_clean_url_key(link)
-                if clean_key not in history_set:
-                    page_all_duplicates = False
-                    break
-            
-            if page_all_duplicates:
-                logging.info(f"تمام پست‌های صفحه {page_num} قبلاً بررسی شده‌اند. اسکن متوقف شد.")
-                stop_pagination = True
-            else:
-                video_links.extend(page_links)
-                logging.info(f"{len(page_links)} لینک معتبر در صفحه {page_num} پیدا شد.")
+    # 4. لینک‌های مستقیم با پسوند ویدیو
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        clean_href = href.split('?')[0].lower()
+        if any(clean_href.endswith(ext) for ext in ['.mp4', '.m3u8', '.webm', '.mov', '.mkv']):
+            found_urls.add(urljoin(base_url, href))
 
-            next_page = None
-            next_link_tag = soup.find('a', rel='next') or \
-                            soup.find('a', class_=re.compile(r'next|pagination', re.I)) or \
-                            soup.find('a', string=re.compile(r'next|بعدی|›|»|older', re.I))
-            
-            if next_link_tag and next_link_tag.get('href'):
-                next_page = urljoin(current_url, next_link_tag['href'])
-            else:
-                parsed_current = urlparse(current_url)
-                path = parsed_current.path.rstrip('/')
-                match = re.search(r'/page/(\d+)/?$', path)
-                if match:
-                    current_p_num = int(match.group(1))
-                    next_path = re.sub(r'/page/\d+/?$', f'/page/{current_p_num + 1}/', path)
-                    next_page = urlunparse(parsed_current._replace(path=next_path))
-                else:
-                    next_page = urlunparse(parsed_current._replace(path=path + '/page/2/'))
+    # 5. استخراج از کدهای جاوااسکریپت و پلیرها
+    for script in soup.find_all('script'):
+        if script.string:
+            matches = re.findall(r'https?://[^\s"\'<>]+\.(?:mp4|m3u8|webm)(?:\?[^\s"\'<>]*)?', script.string)
+            for m in matches:
+                found_urls.add(m)
+            rel_matches = re.findall(r'["\'](/[^"\']+\.(?:mp4|m3u8|webm)(?:\?[^"\']*)?)["\']', script.string)
+            for rm in rel_matches:
+                found_urls.add(urljoin(base_url, rm))
 
-            if next_page:
-                try:
-                    head_resp = requests_cffi.head(next_page, headers=headers, impersonate="chrome", timeout=10, allow_redirects=True)
-                    if head_resp.status_code == 200:
-                        current_url = next_page
-                    else:
-                        break
-                except Exception:
-                    break
-            else:
-                break
-                
-        except Exception as e:
-            logging.error(f"خطا در اسکن صفحه {current_url}: {e}")
-            break
-
-    seen = set()
-    unique_links = []
-    for link in video_links:
-        if link not in seen:
-            seen.add(link)
-            unique_links.append(link)
-            
-    return unique_links
-
-def extract_post_info(url):
-    try:
-        parsed = urlparse(url)
-        path = parsed.path.strip('/')
-        if path:
-            path_parts = path.split('/')
-            if path_parts[0].isdigit():
-                post_id = path_parts[0]
-                post_title = path_parts[1].replace('-', ' ').title() if len(path_parts) > 1 else "video"
-                return post_id, post_title
-            else:
-                post_id = hashlib.md5(path.encode()).hexdigest()[:8]
-                post_title = path.replace('-', ' ').title()
-                return post_id, post_title
-    except Exception:
-        pass
-    return "unknown", "post"
+    return list(found_urls)
 
 def extract_media_from_post(post_url, headers):
-    video_url = None
-    animated_images = []
-    
+    """استخراج ویدیو از پست، آی‌فریم‌ها یا برگرداندن خود لینک صفحه برای yt-dlp"""
+    all_videos = set()
     try:
         response = requests_cffi.get(post_url, headers=headers, impersonate="chrome", timeout=15)
-        response.raise_for_status()
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # استخراج مستقیم از صفحه
+            all_videos.update(find_all_video_srcs(soup, post_url))
+            
+            # بررسی آی‌فریم‌ها
+            for iframe in soup.find_all('iframe'):
+                src = iframe.get('src') or iframe.get('data-src')
+                if src and not src.startswith('javascript:') and not is_ignored_url(src):
+                    iframe_url = urljoin(post_url, src)
+                    try:
+                        iframe_resp = requests_cffi.get(iframe_url, headers=headers, impersonate="chrome", timeout=15)
+                        if iframe_resp.status_code == 200:
+                            iframe_soup = BeautifulSoup(iframe_resp.text, 'html.parser')
+                            all_videos.update(find_all_video_srcs(iframe_soup, iframe_url))
+                    except Exception:
+                        pass
+    except Exception as e:
+        logging.error(f"خطا در اسکرپ مدیا از پست {post_url}: {e}")
+
+    # Fallback حیاتی: اگر هیچ لینک مستقیمی پیدا نشد، خود لینک پست را ارسال می‌کنیم تا yt-dlp تست کند
+    if not all_videos:
+        all_videos.add(post_url)
+        
+    return list(all_videos)
+
+def scrape_all_tabs_and_posts(target_site_url, headers, history):
+    """پیمایش تمام سربرگ‌ها و صفحات برای جمع‌آوری لینک پست‌ها"""
+    base_domain = urlparse(target_site_url).netloc
+    tabs_to_crawl = {target_site_url}
+    collected_post_links = []
+    seen_posts = set()
+    
+    logging.info(f"در حال پیدا کردن سربرگ‌ها و پست‌ها از: {target_site_url}")
+    try:
+        response = requests_cffi.get(target_site_url, headers=headers, impersonate="chrome", timeout=20)
+        if response.status_code != 200:
+            logging.error(f"سایت هدف با کد وضعیت {response.status_code} پاسخ داد: {target_site_url}")
+            return []
+            
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        def find_video_src(s):
-            for v in s.find_all('video'):
-                src = v.get('src')
-                if src: return src
-            for src_tag in s.find_all('source'):
-                src = src_tag.get('src')
-                if src: return src
-            for meta_prop in ['og:video', 'og:video:secure_url', 'og:video:url']:
-                meta = s.find('meta', property=meta_prop)
-                if meta and meta.get('content'):
-                    return meta.get('content')
-            for script in s.find_all('script'):
-                if script.string:
-                    match = re.search(r'file\s*:\s*["\'](https?://[^"\']+\.mp4(?:\?[^"\']*)?)["\']', script.string)
-                    if match: return match.group(1)
-                    match_generic = re.search(r'["\'](https?://[^"\']+\.mp4(?:\?[^"\']*)?)["\']', script.string)
-                    if match_generic: return match_generic.group(1)
-            return None
+        for a in soup.find_all('a', href=True):
+            href = a['href'].strip()
+            full_url = urljoin(target_site_url, href)
+            parsed = urlparse(full_url)
+            
+            if parsed.netloc == base_domain and not is_ignored_url(full_url):
+                if is_tab_or_listing(full_url):
+                    tabs_to_crawl.add(full_url)
 
-        direct_url = find_video_src(soup)
-        if direct_url:
-            video_url = urljoin(post_url, direct_url)
-        else:
-            for iframe in soup.find_all('iframe'):
-                src = iframe.get('src')
-                if src and ('fypttstr.php' in src or 'player' in src or 'embed' in src):
-                    iframe_url = urljoin(post_url, src)
-                    iframe_resp = requests_cffi.get(iframe_url, headers=headers, impersonate="chrome", timeout=15)
-                    if iframe_resp.status_code == 200:
-                        iframe_soup = BeautifulSoup(iframe_resp.text, 'html.parser')
-                        iframe_video = find_video_src(iframe_soup)
-                        if iframe_video:
-                            video_url = urljoin(iframe_url, iframe_video)
-                            break
-
-        for img in soup.find_all('img'):
-            src = img.get('src') or img.get('data-src')
-            if src:
-                src_lower = src.lower()
-                if '.gif' in src_lower or '.webp' in src_lower:
-                    animated_images.append(urljoin(post_url, src))
-                    
     except Exception as e:
-        logging.error(f"خطا در استخراج مدیا از {post_url}: {e}")
-        
-    return video_url, list(set(animated_images))
+        logging.error(f"خطا در اسکن اولیه سایت {target_site_url}: {e}")
+        return []
 
-def download_image(url, headers, filepath):
+    logging.info(f"تعداد {len(tabs_to_crawl)} سربرگ و بخش اصلی شناسایی شد.")
+
+    for tab_url in tabs_to_crawl:
+        logging.info(f"در حال اسکن پست‌های سربرگ: {tab_url}")
+        try:
+            tab_resp = requests_cffi.get(tab_url, headers=headers, impersonate="chrome", timeout=15)
+            if tab_resp.status_code != 200:
+                continue
+            tab_soup = BeautifulSoup(tab_resp.text, 'html.parser')
+            
+            tab_posts_count = 0
+            for a in tab_soup.find_all('a', href=True):
+                href = a['href'].strip()
+                full_post_url = urljoin(tab_url, href)
+                parsed_post = urlparse(full_post_url)
+                
+                if parsed_post.netloc == base_domain and not is_ignored_url(full_post_url):
+                    if not is_tab_or_listing(full_post_url) and full_post_url != tab_url and full_post_url != target_site_url:
+                        clean_key = get_clean_url_key(full_post_url)
+                        if clean_key not in history and full_post_url not in seen_posts:
+                            seen_posts.add(full_post_url)
+                            collected_post_links.append(full_post_url)
+                            tab_posts_count += 1
+
+            logging.info(f"  ✅ تعداد {tab_posts_count} پست جدید از سربرگ {tab_url} استخراج شد.")
+        except Exception as e:
+            logging.error(f"خطا در خواندن سربرگ {tab_url}: {e}")
+
+    return collected_post_links
+
+def download_video(video_url, download_dir, referer=None):
+    """دانلود با yt-dlp به همراه هدرهای اختصاصی ضد مسدودسازی"""
+    os.makedirs(download_dir, exist_ok=True)
+    out_template = os.path.join(download_dir, '%(title).100s [%(id)s].%(ext)s')
+    
+    ydl_opts = {
+        'outtmpl': out_template,
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'quiet': False,
+        'no_warnings': True,
+        'noplaylist': True,
+        'ignoreerrors': True,
+        'http_headers': {
+            'User-Agent': DEFAULT_HEADERS['User-Agent'],
+            'Referer': referer if referer else video_url
+        }
+    }
+    
     try:
-        resp = requests_cffi.get(url, headers=headers, impersonate="chrome", timeout=30)
-        resp.raise_for_status()
-        with open(filepath, 'wb') as f:
-            f.write(resp.content)
-        return True
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=True)
+            if not info:
+                return None
+            downloaded_filename = ydl.prepare_filename(info)
+            if os.path.exists(downloaded_filename):
+                return downloaded_filename
+            
+            # جستجوی فایل در صورت تبدیل پسوند توسط ffmpeg
+            base = os.path.splitext(downloaded_filename)[0]
+            for f in os.listdir(download_dir):
+                full_f = os.path.join(download_dir, f)
+                if full_f.startswith(base) and os.path.isfile(full_f):
+                    return full_f
     except Exception as e:
-        logging.error(f"خطا در دانلود تصویر {url}: {e}")
-        return False
+        logging.error(f"خطا در دانلود با yt-dlp برای {video_url}: {e}")
+    return None
 
-def download_and_process():
-    # دریافت آدرس‌ها و تبدیل آن‌ها به یک لیست (جدا شده با کاما یا خط جدید)
-    target_urls_env = os.environ.get("TARGET_SITE_URL", "")
-    target_urls = [u.strip() for u in re.split(r'[,\n]', target_urls_env) if u.strip()]
-    
-    folder_id = os.environ.get("GDRIVE_FOLDER_ID")
-    
-    if not target_urls or not folder_id:
-        logging.error("آدرس سایت هدف یا شناسه پوشه گوگل درایو موجود نیست.")
-        return
+def main():
+    target_site_env = os.environ.get('TARGET_SITE_URL', '')
+    target_sites = [u.strip() for u in re.split(r'[,\n]', target_site_env) if u.strip()]
 
-    service = get_gdrive_service()
-    if not service:
-        return
+    gdrive_client_id = os.environ.get('GDRIVE_CLIENT_ID')
+    gdrive_client_secret = os.environ.get('GDRIVE_CLIENT_SECRET')
+    gdrive_refresh_token = os.environ.get('GDRIVE_REFRESH_TOKEN')
+    gdrive_folder_id = os.environ.get('GDRIVE_FOLDER_ID')
+    reverse_order = os.environ.get('REVERSE_VIDEO_ORDER', 'False').lower() in ('true', '1', 'yes')
+
+    if not target_sites:
+        logging.error("متغیر TARGET_SITE_URL تنظیم نشده است!")
+        sys.exit(1)
+
+    logging.info("در حال اتصال به Google Drive...")
+    drive_service = get_gdrive_service(gdrive_client_id, gdrive_client_secret, gdrive_refresh_token)
+    if not drive_service:
+        logging.error("اتصال به گوگل درایو ناموفق بود.")
+        sys.exit(1)
 
     history = load_history()
-    total_downloaded_bytes = 0
-    history_changed = False
 
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-
-    # حلقه برای بررسی تک‌تک سایت‌هایی که وارد کرده‌اید
-    for target_url in target_urls:
-        if total_downloaded_bytes >= MAX_DOWNLOAD_BYTES:
-            logging.info("حجم دانلود به سقف ۲ گیگابایت رسیده است. توقف بررسی سایت‌های بعدی.")
-            break
-
-        logging.info(f"==================================================")
-        logging.info(f"در حال بررسی سایت هدف: {target_url}")
-        logging.info(f"==================================================")
+    for target_site_url in target_sites:
+        logging.info(f"\n{'='*60}\nشروع پردازش سایت: {target_site_url}\n{'='*60}")
         
-        scraped_urls = scrape_video_links(target_url, history, max_pages=10)
-        
-        if not scraped_urls:
-            logging.warning(f"هیچ پست جدیدی در {target_url} یافت نشد.")
-            continue
+        post_links = scrape_all_tabs_and_posts(target_site_url, DEFAULT_HEADERS, history)
+        logging.info(f"🚀 مجموع کل پست‌های واجد شرایط: {len(post_links)}")
 
-        if REVERSE_VIDEO_ORDER:
-            scraped_urls.reverse()
+        if reverse_order:
+            post_links.reverse()
+            logging.info("ترتیب بررسی لینک‌ها معکوس شد.")
 
-        for url in scraped_urls:
-            if total_downloaded_bytes >= MAX_DOWNLOAD_BYTES:
-                logging.info(f"حجم دانلود به سقف ۲ گیگابایت رسید (دانلود شده: {total_downloaded_bytes / (1024*1024):.2f} MB). توقف دانلود از این سایت.")
-                break
-                
-            clean_post_key = get_clean_url_key(url)
+        for idx, post_url in enumerate(post_links, 1):
+            clean_post_key = get_clean_url_key(post_url)
             if clean_post_key in history:
+                logging.info(f"[{idx}/{len(post_links)}] قبلاً کامل دانلود شده: {post_url}")
                 continue
 
-            post_id, post_title = extract_post_info(url)
-            logging.info(f"شروع پردازش پست: [{post_id}] {post_title}")
-            
-            video_url, animated_images = extract_media_from_post(url, headers)
-            
-            clean_title = "".join(c for c in post_title if c.isalnum() or c in (' ', '_', '-')).strip()[:80]
+            logging.info(f"[{idx}/{len(post_links)}] در حال پردازش پست: {post_url}")
+            video_urls = extract_media_from_post(post_url, DEFAULT_HEADERS)
 
-            # --- پردازش ویدیو ---
-            if video_url:
+            all_downloaded = True
+            download_count = 0
+            
+            for v_idx, video_url in enumerate(video_urls, 1):
                 clean_video_key = get_clean_url_key(video_url)
-                if clean_video_key not in history:
-                    logging.info(f"در حال دانلود ویدیو: {video_url}")
-                    
-                    download_opts = {
-                        'format': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]/best',
-                        'outtmpl': f'{DOWNLOAD_FOLDER}/{clean_title} [{post_id}].%(ext)s',
-                        'ignoreerrors': True,
-                        'http_headers': {'Referer': url, 'User-Agent': headers['User-Agent']}
-                    }
-
-                    try:
-                        with yt_dlp.YoutubeDL(download_opts) as ydl:
-                            info = ydl.extract_info(video_url, download=True)
-                            if info:
-                                expected_path = ydl.prepare_filename(info)
-                                file_path = expected_path
-                                
-                                if not os.path.exists(file_path):
-                                    base_path = os.path.splitext(expected_path)[0]
-                                    for ext in ['mp4', 'mkv', 'webm', 'avi']:
-                                        if os.path.exists(f"{base_path}.{ext}"):
-                                            file_path = f"{base_path}.{ext}"
-                                            break
-
-                                if file_path and os.path.exists(file_path):
-                                    file_size = os.path.getsize(file_path)
-                                    total_downloaded_bytes += file_size
-                                    
-                                    if upload_to_gdrive(service, folder_id, file_path):
-                                        os.remove(file_path)
-                                        history.add(clean_video_key)
-                                        history_changed = True
-                    except Exception as e:
-                        logging.error(f"خطا در دانلود ویدیو {video_url}: {e}")
-
-            # --- پردازش تصاویر متحرک ---
-            for idx, img_url in enumerate(animated_images):
-                if total_downloaded_bytes >= MAX_DOWNLOAD_BYTES:
-                    logging.info("حجم دانلود به سقف ۲ گیگابایت رسید. توقف دانلود تصاویر.")
-                    break
-                    
-                clean_img_key = get_clean_url_key(img_url)
-                if clean_img_key in history:
+                if clean_video_key in history:
+                    logging.info(f"  ({v_idx}/{len(video_urls)}) ویدیو قبلاً ثبت شده: {video_url}")
                     continue
-                    
-                ext = img_url.split('.')[-1].split('?')[0]
-                if ext.lower() not in ['gif', 'webp']:
-                    ext = 'gif'
-                    
-                img_filename = f"{clean_title} [{post_id}]_anim_{idx}.{ext}"
-                img_filepath = os.path.join(DOWNLOAD_FOLDER, img_filename)
-                
-                logging.info(f"در حال دانلود تصویر متحرک: {img_url}")
-                if download_image(img_url, headers, img_filepath):
-                    file_size = os.path.getsize(img_filepath)
-                    total_downloaded_bytes += file_size
-                    
-                    if upload_to_gdrive(service, folder_id, img_filepath):
-                        os.remove(img_filepath)
-                        history.add(clean_img_key)
-                        history_changed = True
 
-            # ثبت خود پست در تاریخچه
-            history.add(clean_post_key)
-            history_changed = True
+                logging.info(f"  ({v_idx}/{len(video_urls)}) شروع دانلود: {video_url}")
+                downloaded_file = download_video(video_url, DOWNLOAD_DIR, referer=post_url)
 
-    if history_changed:
-        save_history(history)
-        
-    logging.info(f"پایان عملیات. کل حجم دانلود شده در این نوبت: {total_downloaded_bytes / (1024*1024):.2f} مگابایت.")
+                if downloaded_file and os.path.exists(downloaded_file):
+                    logging.info(f"  فایل دانلود شد: {downloaded_file} -> شروع آپلود به گوگل درایو...")
+                    success = upload_to_gdrive(drive_service, downloaded_file, gdrive_folder_id)
+                    
+                    # پاک کردن فایل دانلود شده برای پر نشدن دیسک گیت‌هاب رانر
+                    try:
+                        os.remove(downloaded_file)
+                    except Exception:
+                        pass
 
-if __name__ == "__main__":
-    setup_environment()
-    download_and_process()
+                    if success:
+                        save_to_history(video_url)
+                        history.add(clean_video_key)
+                        download_count += 1
+                    else:
+                        all_downloaded = False
+                else:
+                    all_downloaded = False
+
+            if all_downloaded and download_count > 0:
+                save_to_history(post_url)
+                history.add(clean_post_key)
+                logging.info(f"  پست و تمام ویدیوهای آن با موفقیت ذخیره شدند.")
+
+if __name__ == '__main__':
+    main()
