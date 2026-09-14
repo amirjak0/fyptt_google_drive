@@ -53,6 +53,10 @@ IGNORED_KEYWORDS = [
     'join', 'signup', 'affiliate', 'amember', 'iamgettingoutnow'
 ]
 
+# --- تغییر ۱: ایجاد نشست (Session) پایدار برای نگهداری کوکی‌های کلودفلر ---
+scraper_session = requests_cffi.Session(impersonate="chrome")
+
+
 def load_history():
     """خواندن لیست لینک‌هایی که قبلاً دانلود شده‌اند"""
     history = set()
@@ -202,7 +206,8 @@ def extract_media_from_post(post_url, headers):
     """استخراج ویدیو از پست، آی‌فریم‌ها یا برگرداندن خود لینک صفحه برای yt-dlp"""
     all_videos = set()
     try:
-        response = requests_cffi.get(post_url, headers=headers, impersonate="chrome", timeout=15)
+        # --- تغییر ۲: استفاده از سشن پایدار ---
+        response = scraper_session.get(post_url, headers=headers, timeout=15)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
@@ -215,7 +220,8 @@ def extract_media_from_post(post_url, headers):
                 if src and not src.startswith('javascript:') and not is_ignored_url(src):
                     iframe_url = urljoin(post_url, src)
                     try:
-                        iframe_resp = requests_cffi.get(iframe_url, headers=headers, impersonate="chrome", timeout=15)
+                        # --- تغییر ۲: استفاده از سشن پایدار ---
+                        iframe_resp = scraper_session.get(iframe_url, headers=headers, timeout=15)
                         if iframe_resp.status_code == 200:
                             iframe_soup = BeautifulSoup(iframe_resp.text, 'html.parser')
                             all_videos.update(find_all_video_srcs(iframe_soup, iframe_url))
@@ -239,7 +245,8 @@ def scrape_all_tabs_and_posts(target_site_url, headers, history):
     
     logging.info(f"در حال پیدا کردن سربرگ‌ها و پست‌ها از: {target_site_url}")
     try:
-        response = requests_cffi.get(target_site_url, headers=headers, impersonate="chrome", timeout=20)
+        # --- تغییر ۲: استفاده از سشن پایدار ---
+        response = scraper_session.get(target_site_url, headers=headers, timeout=20)
         if response.status_code != 200:
             logging.error(f"سایت هدف با کد وضعیت {response.status_code} پاسخ داد: {target_site_url}")
             return []
@@ -264,7 +271,8 @@ def scrape_all_tabs_and_posts(target_site_url, headers, history):
     for tab_url in tabs_to_crawl:
         logging.info(f"در حال اسکن پست‌های سربرگ: {tab_url}")
         try:
-            tab_resp = requests_cffi.get(tab_url, headers=headers, impersonate="chrome", timeout=15)
+            # --- تغییر ۲: استفاده از سشن پایدار ---
+            tab_resp = scraper_session.get(tab_url, headers=headers, timeout=15)
             if tab_resp.status_code != 200:
                 continue
             tab_soup = BeautifulSoup(tab_resp.text, 'html.parser')
@@ -301,6 +309,10 @@ def download_video(video_url, download_dir, referer=None):
         'no_warnings': True,
         'noplaylist': True,
         'ignoreerrors': True,
+        # --- تغییر ۳: اضافه کردن impersonate به yt-dlp برای دور زدن کلودفلر ---
+        'extractor_args': {
+            'generic': ['impersonate']
+        },
         'http_headers': {
             'User-Agent': DEFAULT_HEADERS['User-Agent'],
             'Referer': referer if referer else video_url
