@@ -54,7 +54,8 @@ IGNORED_KEYWORDS = [
 def setup_browser():
     co = ChromiumOptions()
     co.set_browser_path('/usr/bin/google-chrome')
-    co.set_argument('--headless=new')
+    # خاموش کردن کامل هدلس برای دور زدن راحت‌تر کلودفلر (چون Xvfb داریم مشکلی نیست)
+    co.headless(False) 
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--disable-gpu')
@@ -82,10 +83,14 @@ def export_cookies_for_ytdlp(page, filename=COOKIE_FILE):
     except Exception:
         pass
 
-def get_page_with_cf_bypass(page, url):
+def get_page_and_sniff(page, url):
+    """باز کردن صفحه، حل کلودفلر، کلیک روی دکمه‌های Play و شنود شبکه"""
+    found_videos = set()
     try:
+        # فعال‌سازی رادار شبکه برای استخراج لینک‌های واقعی ویدیو
+        page.listen.start(['.mp4', '.m3u8', '.webm', '.ts'])
         page.get(url)
-        time.sleep(4) 
+        time.sleep(3)
         
         if "Just a moment..." in page.html or "Cloudflare" in page.title or "Attention Required" in page.html:
             logging.info(f"🛡️ دیوار کلودفلر شناسایی شد. در حال حل چالش جاوااسکریپت...")
@@ -93,15 +98,34 @@ def get_page_with_cf_bypass(page, url):
                 cf_iframe = page.get_frame('@src^https://challenges.cloudflare.com')
                 if cf_iframe:
                     cf_iframe.ele('xpath://input[@type="checkbox"] | //*[@id="challenge-stage"]', timeout=3).click()
-            except Exception:
-                pass
-            time.sleep(12) 
+            except Exception: pass
+            time.sleep(12)
             
-        export_cookies_for_ytdlp(page)
-        return page.html
+        # اسکرول به پایین تا ویدیوهای تنبل لود شوند
+        page.scroll.to_bottom()
+        time.sleep(2)
+        
+        # پیدا کردن دکمه‌های Play و کلیک روی آن‌ها برای تریگر شدن دانلود در پس‌زمینه
+        try:
+            btns = page.eles('xpath://button[contains(@class, "play") or contains(@class, "vjs")] | //div[contains(@class, "play")]')
+            for btn in btns[:2]:
+                btn.click(by_js=True)
+                time.sleep(2)
+        except Exception: pass
+        
+        # استخراج لینک‌های ویدیو که در شبکه دزدیده شده‌اند
+        for packet in page.listen.steps(timeout=3):
+            req_url = getattr(packet, 'url', None) or getattr(packet.request, 'url', None)
+            if req_url and not is_ignored_url(req_url):
+                found_videos.add(req_url)
+                
     except Exception as e:
-        logging.error(f"خطا در دریافت صفحه {url}: {e}")
-        return ""
+        logging.error(f"خطا در پردازش صفحه {url}: {e}")
+    finally:
+        page.listen.stop()
+        export_cookies_for_ytdlp(page)
+        
+    return page.html, list(found_videos)
 
 def load_history():
     history = set()
@@ -164,79 +188,70 @@ def is_tab_or_listing(url):
     clean_url = url.lower().split('?')[0].rstrip('/')
     return any(keyword in clean_url for keyword in TAB_KEYWORDS) or '/page/' in clean_url
 
-
-def simulate_play_clicks_and_sniff(page, base_url):
-    """
-    اسلحه مخفی: پیدا کردن دکمه‌های Play و کلیک روی آنها،
-    سپس شنود شبکه برای دزدیدن لینک‌های mp4 که پس از کلیک لود می‌شوند.
-    """
+def find_all_video_srcs(html, base_url):
     found_urls = set()
+    soup = BeautifulSoup(html, 'html.parser')
     
-    try:
-        # روشن کردن شنودگر شبکه
-        page.listen.start('*.mp4*|*.m3u8*|*.webm*')
-        
-        # اسکرول برای نمایان شدن ویدیوها
-        page.scroll.to_half()
-        time.sleep(1)
-        
-        # پیدا کردن هر چیزی که شبیه دکمه Play است و کلیک روی آن
-        play_buttons = page.eles('xpath://button[contains(@class, "play") or contains(@class, "vjs-big-play-button")] | //div[contains(@class, "play")] | //a[contains(@href, "video")]')
-        for btn in play_buttons[:3]: # حداکثر 3 کلیک برای جلوگیری از گیر کردن
-            try:
-                btn.click(by_js=True)
-                time.sleep(2)
-            except: pass
+    for v in soup.find_all(['video', 'audio']):
+        for attr in ['src', 'data-src', 'data-video', 'data-url', 'data-orig']:
+            val = v.get(attr)
+            if val and not val.startswith('blob:'): 
+                found_urls.add(urljoin(base_url, val))
+        for src_tag in v.find_all('source'):
+            val = src_tag.get('src')
+            if val and not val.startswith('blob:'): 
+                found_urls.add(urljoin(base_url, val))
+                
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        if any(ext in href.lower() for ext in ['.mp4', '.m3u8', '.webm']):
+            found_urls.add(urljoin(base_url, href))
             
-        # بررسی ترافیک شبکه دزدیده شده
-        for packet in page.listen.steps(timeout=4):
-            url = packet.request.url
-            if any(ext in url.lower() for ext in ['.mp4', '.m3u8', '.webm']):
-                if not is_ignored_url(url):
-                    found_urls.add(url)
-                    
-    except Exception:
-        pass
-    finally:
-        page.listen.stop()
-        
+    pattern = r'(https?://[^\s"\'<>\[\]]+\.(?:mp4|m3u8|webm)(?:\?[^\s"\'<>\[\]]*)?)'
+    for match in re.findall(pattern, html, re.IGNORECASE):
+        found_urls.add(match.replace('\\/', '/'))
+
     return list(found_urls)
 
 
 def extract_media_from_post(page, post_url):
     all_videos = set()
     try:
-        html = get_page_with_cf_bypass(page, post_url)
+        html, sniffed_videos = get_page_and_sniff(page, post_url)
+        all_videos.update(sniffed_videos)
+        all_videos.update(find_all_video_srcs(html, post_url))
         
-        # ۱. استخراج استاندارد از کدهای HTML و JS
         soup = BeautifulSoup(html, 'html.parser')
-        for v in soup.find_all(['video', 'audio']):
-            for attr in ['src', 'data-src', 'data-video', 'data-url', 'data-orig']:
-                val = v.get(attr)
-                if val and not val.startswith('blob:'): all_videos.add(urljoin(post_url, val))
-            for src_tag in v.find_all('source'):
-                val = src_tag.get('src')
-                if val and not val.startswith('blob:'): all_videos.add(urljoin(post_url, val))
-                    
+        
+        # استخراج دکمه‌ها و لینک‌های خارجی که به سایت اصلی ویدیو (مثل backroomcastingcouch) می‌روند
+        external_links = []
         for a in soup.find_all('a', href=True):
             href = a['href']
-            if any(ext in href.lower() for ext in ['.mp4', '.m3u8', '.webm']):
-                all_videos.add(urljoin(post_url, href))
-                
-        pattern = r'(https?://[^\s"\'<>\[\]]+\.(?:mp4|m3u8|webm)(?:\?[^\s"\'<>\[\]]*)?)'
-        for match in re.findall(pattern, html, re.IGNORECASE): all_videos.add(match.replace('\\/', '/'))
-        
-        # ۲. کلیک روی دکمه‌های Play و دزدیدن ترافیک شبکه (برای سایت‌هایی مثل backroomcastingcouch)
-        all_videos.update(simulate_play_clicks_and_sniff(page, post_url))
-        
-        # ۳. اسکن آی‌فریم‌ها
+            text = a.get_text(strip=True).lower()
+            classes = " ".join(a.get('class', [])).lower()
+            
+            parsed_href = urlparse(href)
+            if parsed_href.netloc and parsed_href.netloc != urlparse(post_url).netloc:
+                if not is_ignored_url(href):
+                    # اگر لینک دکمه، یا حاوی کلمات کلیدی تماشای ویدیو بود
+                    if "watch" in text or "full" in text or "video" in text or "scene" in text or "unlock" in text or "play" in classes or "btn" in classes or "button" in classes:
+                        external_links.append(href)
+                        
+        # بررسی سایت‌های مقصد (حداکثر ۲ لینک برای جلوگیری از گیر کردن)
+        for ext_url in external_links[:2]:
+            logging.info(f"🔍 دنبال کردن لینک سایت خارجی سازنده ویدیو: {ext_url}")
+            ext_html, ext_sniffed = get_page_and_sniff(page, ext_url)
+            all_videos.update(ext_sniffed)
+            all_videos.update(find_all_video_srcs(ext_html, ext_url))
+            
+        # بررسی آی‌فریم‌ها
         for iframe in soup.find_all('iframe'):
             src = iframe.get('src') or iframe.get('data-src')
             if src and not src.startswith('javascript:') and not is_ignored_url(src):
                 iframe_url = urljoin(post_url, src)
-                iframe_html = get_page_with_cf_bypass(page, iframe_url)
-                # اسکن آی‌فریم و دزدیدن ترافیک داخل آی‌فریم
-                all_videos.update(simulate_play_clicks_and_sniff(page, iframe_url))
+                iframe_html, i_sniffed = get_page_and_sniff(page, iframe_url)
+                all_videos.update(i_sniffed)
+                all_videos.update(find_all_video_srcs(iframe_html, iframe_url))
 
     except Exception as e:
         logging.error(f"خطا در اسکرپ مدیا: {e}")
@@ -245,8 +260,7 @@ def extract_media_from_post(page, post_url):
         if not (post_url.endswith('/?0') or '#' in post_url):
             all_videos.add(post_url)
             
-    filtered_videos = [v for v in all_videos if not is_ignored_url(v)]
-    return filtered_videos
+    return [v for v in all_videos if not is_ignored_url(v)]
 
 
 def scrape_all_tabs_and_posts(page, target_site_url, history):
@@ -256,7 +270,7 @@ def scrape_all_tabs_and_posts(page, target_site_url, history):
     seen_posts = set()
     
     try:
-        html = get_page_with_cf_bypass(page, target_site_url)
+        html, _ = get_page_and_sniff(page, target_site_url)
         soup = BeautifulSoup(html, 'html.parser')
         for a in soup.find_all('a', href=True):
             full_url = urljoin(target_site_url, a['href'].strip())
@@ -268,7 +282,7 @@ def scrape_all_tabs_and_posts(page, target_site_url, history):
 
     for tab_url in list(tabs_to_crawl)[:15]:
         try:
-            tab_html = get_page_with_cf_bypass(page, tab_url)
+            tab_html, _ = get_page_and_sniff(page, tab_url)
             tab_soup = BeautifulSoup(tab_html, 'html.parser')
             for a in tab_soup.find_all('a', href=True):
                 full_post_url = urljoin(tab_url, a['href'].strip())
