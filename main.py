@@ -62,7 +62,9 @@ def setup_browser():
 def export_cookies_for_ytdlp(page, filename=COOKIE_FILE):
     """استخراج کوکی‌های تایید شده‌ی عبور از کلودفلر و ذخیره در فایل متنی برای yt-dlp"""
     try:
-        cookies = page.cookies(as_dict=False)
+        # ---- تغییر مهم: استفاده از متد صحیح برای نسخه جدید DrissionPage ----
+        cookies = page.cookies() 
+        # -------------------------------------------------------------------
         with open(filename, 'w', encoding='utf-8') as f:
             f.write("# Netscape HTTP Cookie File\n")
             for cookie in cookies:
