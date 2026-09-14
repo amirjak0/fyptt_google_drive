@@ -31,7 +31,7 @@ TAB_KEYWORDS = [
     'pornstars', 'new', 'studios', 'niche', 'category', 'tag'
 ]
 
-# لیست عظیم دامنه‌های تبلیغاتی که نباید به عنوان ویدیو شناخته شوند
+# دامنه‌های تبلیغاتی که نباید به عنوان ویدیو شناخته شوند
 IGNORED_DOMAINS = [
     'segpay.com', 'epoch.com', 'psmhelp.com', 'mlfhelp.com', 'paperstreetcash.com', 
     'auth.reptyle.com', 'ccbill.com', 'verotel.com', 'probiller.com', 'google.com', 
@@ -49,15 +49,16 @@ IGNORED_KEYWORDS = [
     'iamgettingoutnow', 'ad.php', 'out.php'
 ]
 
+
 def setup_browser():
-    """راه‌اندازی مرورگر واقعی کروم روی سرور"""
+    """راه‌اندازی مرورگر واقعی کروم روی سرور لینوکس گیت‌هاب"""
     co = ChromiumOptions()
     
-    # --- تغییر طلایی ---
-    # از آنجا که در گیت‌هاب اکشن از xvfb استفاده کرده‌ایم، هدلس را خاموش می‌کنیم!
-    # این کار باعث می‌شود کلودفلر ۱۰۰٪ فریب بخورد و ربات را مسدود نکند.
-    co.headless(False) 
-    # ------------------
+    # تنظیم مسیر دقیق کروم در گیت‌هاب اکشنز تا خطای کانکشن ندهد
+    co.set_browser_path('/usr/bin/google-chrome')
+    
+    # استفاده از حالت هدلس جدید که کلودفلر را فریب می‌دهد و روی لینوکس کرش نمی‌کند
+    co.set_argument('--headless=new')
     
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-dev-shm-usage')
@@ -94,11 +95,9 @@ def get_page_with_cf_bypass(page, url):
         page.get(url)
         time.sleep(4) 
         
-        # اگر سایت دارای محافظت باشد، مرورگر به صورت خودکار با جاوااسکریپت آن را حل می‌کند
         if "Just a moment..." in page.html or "Cloudflare" in page.title or "Attention Required" in page.html:
             logging.info(f"🛡️ دیوار کلودفلر شناسایی شد. در حال حل چالش جاوااسکریپت...")
             
-            # گاهی نیاز به کلیک روی دکمه است
             try:
                 cf_iframe = page.get_frame('@src^https://challenges.cloudflare.com')
                 if cf_iframe:
@@ -190,7 +189,6 @@ def find_all_video_srcs(soup, base_url):
 def extract_media_from_post(page, post_url):
     all_videos = set()
     try:
-        # حتی اگر لینک خارجی (سایت دوم) باشد، مرورگر آن را باز کرده و کلودفلرش را رد می‌کند
         html = get_page_with_cf_bypass(page, post_url)
         soup = BeautifulSoup(html, 'html.parser')
         all_videos.update(find_all_video_srcs(soup, post_url))
@@ -222,7 +220,6 @@ def scrape_all_tabs_and_posts(page, target_site_url, history):
         soup = BeautifulSoup(html, 'html.parser')
         for a in soup.find_all('a', href=True):
             full_url = urljoin(target_site_url, a['href'].strip())
-            # سربرگ‌ها همیشه باید از سایت اصلی باشند
             if urlparse(full_url).netloc == base_domain and not is_ignored_url(full_url) and is_tab_or_listing(full_url):
                 tabs_to_crawl.add(full_url)
     except Exception as e:
@@ -243,8 +240,6 @@ def scrape_all_tabs_and_posts(page, target_site_url, history):
                 is_internal = parsed_post.netloc == base_domain
                 
                 if not is_tab_or_listing(full_post_url):
-                    # --- پشتیبانی از سایت‌های وصل شونده (Aggregators) ---
-                    # اگر لینک به سایت خارجی ارجاع می‌دهد، به شرطی قبول کن که صفحه اصلی سایت نباشد
                     if not is_internal and parsed_post.path in ['', '/']:
                         continue
                         
@@ -320,8 +315,13 @@ def main():
         
     history = load_history()
 
-    logging.info("در حال اجرای موتور مرورگر کروم مخفی (رندرینگ واقعی) برای دور زدن فایروال‌ها...")
-    browser_page = setup_browser()
+    logging.info("در حال اجرای موتور مرورگر کروم برای دور زدن فایروال‌ها...")
+    try:
+        browser_page = setup_browser()
+    except Exception as e:
+        logging.error(f"اجرای مرورگر با مشکل مواجه شد: {e}")
+        sys.exit(1)
+        
     user_agent = browser_page.user_agent
 
     clean_downloads_folder()
@@ -361,7 +361,9 @@ def main():
                 
             clean_downloads_folder()
 
-    browser_page.quit()
+    try:
+        browser_page.quit()
+    except: pass
 
 if __name__ == '__main__':
     main()
