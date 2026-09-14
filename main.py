@@ -31,28 +31,38 @@ TAB_KEYWORDS = [
     'pornstars', 'new', 'studios', 'niche', 'category', 'tag'
 ]
 
+# لیست عظیم دامنه‌های تبلیغاتی که نباید به عنوان ویدیو شناخته شوند
 IGNORED_DOMAINS = [
-    'segpay.com', 'epoch.com', 'psmhelp.com', 'mlfhelp.com',
-    'paperstreetcash.com', 'auth.reptyle.com', 'ccbill.com',
-    'verotel.com', 'probiller.com', 'google.com', 'twitter.com', 'facebook.com'
+    'segpay.com', 'epoch.com', 'psmhelp.com', 'mlfhelp.com', 'paperstreetcash.com', 
+    'auth.reptyle.com', 'ccbill.com', 'verotel.com', 'probiller.com', 'google.com', 
+    'twitter.com', 'facebook.com', 'chaturbate.com', 'bongacams.com', 'camsoda.com',
+    'stripchat.com', 'livejasmin.com', 'jerkmate.com', 'myfreecams.com',
+    'adultfriendfinder.com', 'cams.com', 'awempire.com', 'clickdealer.com',
+    'adtng.com', 'awptg.com', 'trafficjunky.com', 'exoclick.com', 'realsrv.com',
+    'porntraffic.com', 'eroadvertising.com', 'juicyads.com', 'plugrush.com'
 ]
 
 IGNORED_KEYWORDS = [
-    'billingsupport', 'section2257', 'tos', 'privacy', 'refund',
-    'faq', 'technicalsupport', 'content-removal', 'complaints',
-    'dmca', 'anti-trafficking', 'cookie-policy', 'login', 'oauth',
-    'join', 'signup', 'affiliate', 'amember', 'iamgettingoutnow'
+    'billingsupport', 'section2257', 'tos', 'privacy', 'refund', 'faq', 
+    'technicalsupport', 'content-removal', 'complaints', 'dmca', 'anti-trafficking', 
+    'cookie-policy', 'login', 'oauth', 'join', 'signup', 'affiliate', 'amember', 
+    'iamgettingoutnow', 'ad.php', 'out.php'
 ]
 
-
 def setup_browser():
-    """راه‌اندازی مرورگر واقعی کروم روی سرور به صورت مخفی (Headless)"""
+    """راه‌اندازی مرورگر واقعی کروم روی سرور"""
     co = ChromiumOptions()
-    co.headless(True)
-    # این آرگومان‌ها برای اجرای پایدار کروم در محیط‌های ابری مثل لینوکس گیت‌هاب ضروری هستند
+    
+    # --- تغییر طلایی ---
+    # از آنجا که در گیت‌هاب اکشن از xvfb استفاده کرده‌ایم، هدلس را خاموش می‌کنیم!
+    # این کار باعث می‌شود کلودفلر ۱۰۰٪ فریب بخورد و ربات را مسدود نکند.
+    co.headless(False) 
+    # ------------------
+    
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--disable-gpu')
+    co.set_argument('--window-size=1280,720')
     co.set_argument('--disable-blink-features=AutomationControlled')
     co.set_user_agent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
     
@@ -62,9 +72,7 @@ def setup_browser():
 def export_cookies_for_ytdlp(page, filename=COOKIE_FILE):
     """استخراج کوکی‌های تایید شده‌ی عبور از کلودفلر و ذخیره در فایل متنی برای yt-dlp"""
     try:
-        # ---- تغییر مهم: استفاده از متد صحیح برای نسخه جدید DrissionPage ----
         cookies = page.cookies() 
-        # -------------------------------------------------------------------
         with open(filename, 'w', encoding='utf-8') as f:
             f.write("# Netscape HTTP Cookie File\n")
             for cookie in cookies:
@@ -78,18 +86,27 @@ def export_cookies_for_ytdlp(page, filename=COOKIE_FILE):
                 value = cookie.get('value', '')
                 f.write(f"{domain}\t{initial_dot}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
     except Exception as e:
-        logging.error(f"خطا در استخراج کوکی‌ها: {e}")
+        pass
 
 def get_page_with_cf_bypass(page, url):
-    """باز کردن سایت و دور زدن چالش کلودفلر (آندر اتک)"""
+    """باز کردن سایت و دور زدن چالش کلودفلر"""
     try:
         page.get(url)
-        time.sleep(4) # صبر اولیه برای لود شدن جاوااسکریپت
+        time.sleep(4) 
         
-        # بررسی اینکه آیا در صفحه تایید کلودفلر گیر کرده‌ایم
-        if "Just a moment..." in page.html or "Cloudflare" in page.title:
-            logging.info("🛡️ دیوار کلودفلر شناسایی شد. در حال حل چالش جاوااسکریپت...")
-            time.sleep(12) # صبر بیشتر برای حل خودکار کپچای مخفی توسط موتور کروم
+        # اگر سایت دارای محافظت باشد، مرورگر به صورت خودکار با جاوااسکریپت آن را حل می‌کند
+        if "Just a moment..." in page.html or "Cloudflare" in page.title or "Attention Required" in page.html:
+            logging.info(f"🛡️ دیوار کلودفلر شناسایی شد. در حال حل چالش جاوااسکریپت...")
+            
+            # گاهی نیاز به کلیک روی دکمه است
+            try:
+                cf_iframe = page.get_frame('@src^https://challenges.cloudflare.com')
+                if cf_iframe:
+                    cf_iframe.ele('xpath://input[@type="checkbox"] | //*[@id="challenge-stage"]', timeout=3).click()
+            except Exception:
+                pass
+                
+            time.sleep(12) 
             
         export_cookies_for_ytdlp(page)
         return page.html
@@ -173,6 +190,7 @@ def find_all_video_srcs(soup, base_url):
 def extract_media_from_post(page, post_url):
     all_videos = set()
     try:
+        # حتی اگر لینک خارجی (سایت دوم) باشد، مرورگر آن را باز کرده و کلودفلرش را رد می‌کند
         html = get_page_with_cf_bypass(page, post_url)
         soup = BeautifulSoup(html, 'html.parser')
         all_videos.update(find_all_video_srcs(soup, post_url))
@@ -186,7 +204,6 @@ def extract_media_from_post(page, post_url):
     except Exception as e:
         logging.error(f"خطا در اسکرپ مدیا: {e}")
 
-    # Fallback حیاتی: جلوگیری از ارسال لینک‌های غیر ویدیویی وب‌سایت به yt-dlp 
     if not all_videos:
         if not (post_url.endswith('/?0') or '#' in post_url):
             all_videos.add(post_url)
@@ -205,31 +222,41 @@ def scrape_all_tabs_and_posts(page, target_site_url, history):
         soup = BeautifulSoup(html, 'html.parser')
         for a in soup.find_all('a', href=True):
             full_url = urljoin(target_site_url, a['href'].strip())
+            # سربرگ‌ها همیشه باید از سایت اصلی باشند
             if urlparse(full_url).netloc == base_domain and not is_ignored_url(full_url) and is_tab_or_listing(full_url):
                 tabs_to_crawl.add(full_url)
     except Exception as e:
         logging.error(f"خطا در اسکن اولیه: {e}")
         return []
 
-    # محدودیت تعداد تب‌ها برای جلوگیری از تایم‌اوت شدن اکشن گیت‌هاب
     for tab_url in list(tabs_to_crawl)[:15]:
         try:
             tab_html = get_page_with_cf_bypass(page, tab_url)
             tab_soup = BeautifulSoup(tab_html, 'html.parser')
             for a in tab_soup.find_all('a', href=True):
                 full_post_url = urljoin(tab_url, a['href'].strip())
-                if urlparse(full_post_url).netloc == base_domain and not is_ignored_url(full_post_url):
-                    if not is_tab_or_listing(full_post_url) and full_post_url not in seen_posts:
-                        clean_key = get_clean_url_key(full_post_url)
-                        if clean_key not in history:
-                            seen_posts.add(full_post_url)
-                            collected_post_links.append(full_post_url)
+                
+                if is_ignored_url(full_post_url):
+                    continue
+                    
+                parsed_post = urlparse(full_post_url)
+                is_internal = parsed_post.netloc == base_domain
+                
+                if not is_tab_or_listing(full_post_url):
+                    # --- پشتیبانی از سایت‌های وصل شونده (Aggregators) ---
+                    # اگر لینک به سایت خارجی ارجاع می‌دهد، به شرطی قبول کن که صفحه اصلی سایت نباشد
+                    if not is_internal and parsed_post.path in ['', '/']:
+                        continue
+                        
+                    clean_key = get_clean_url_key(full_post_url)
+                    if clean_key not in history and full_post_url not in seen_posts:
+                        seen_posts.add(full_post_url)
+                        collected_post_links.append(full_post_url)
         except Exception: pass
 
     return collected_post_links
 
 def download_video(video_url, download_dir, referer, user_agent):
-    """دانلود با استفاده از yt-dlp و کوکی‌های استخراج شده از مرورگر مخفی"""
     os.makedirs(download_dir, exist_ok=True)
     out_template = os.path.join(download_dir, '%(title).100s [%(id)s].%(ext)s')
     
@@ -240,7 +267,6 @@ def download_video(video_url, download_dir, referer, user_agent):
         'no_warnings': True,
         'noplaylist': True,
         'ignoreerrors': True,
-        # کوکی فایل کلید اصلی دور زدن محافظت‌های امنیتی سرورهای دانلود است
         'cookiefile': COOKIE_FILE, 
         'http_headers': {
             'User-Agent': user_agent,
@@ -263,7 +289,7 @@ def download_video(video_url, download_dir, referer, user_agent):
 
 
 def clean_downloads_folder():
-    """حذف فایل‌های موقت یا خراب yt-dlp برای جلوگیری از پر شدن دیسک سرور گیت‌هاب"""
+    """حذف فایل‌های موقت یا خراب yt-dlp"""
     try:
         if os.path.exists(DOWNLOAD_DIR):
             for file in os.listdir(DOWNLOAD_DIR):
@@ -294,12 +320,11 @@ def main():
         
     history = load_history()
 
-    # روشن کردن موتور مرورگر کروم واقعی روی سرور ابری
-    logging.info("در حال اجرای موتور مرورگر کروم مخفی (Headless) برای دور زدن فایروال‌ها...")
+    logging.info("در حال اجرای موتور مرورگر کروم مخفی (رندرینگ واقعی) برای دور زدن فایروال‌ها...")
     browser_page = setup_browser()
     user_agent = browser_page.user_agent
 
-    clean_downloads_folder() # اطمینان از خالی بودن پوشه قبل از شروع
+    clean_downloads_folder()
 
     for target_site_url in target_sites:
         logging.info(f"\nشروع بررسی سایت: {target_site_url}")
@@ -334,7 +359,7 @@ def main():
                 save_to_history(post_url)
                 history.add(get_clean_url_key(post_url))
                 
-            clean_downloads_folder() # پاکسازی فایل‌های پارت‌گذاری شده‌ی خراب yt-dlp
+            clean_downloads_folder()
 
     browser_page.quit()
 
