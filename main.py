@@ -32,7 +32,7 @@ TAB_KEYWORDS = [
     'pornstars', 'new', 'studios', 'niche', 'category', 'tag'
 ]
 
-# دامنه‌های تبلیغاتی پاپ‌آپ و سیستم‌های ریدایرکت (لیست کامل‌تر)
+# دامنه‌های تبلیغاتی
 IGNORED_DOMAINS = [
     'segpay.com', 'epoch.com', 'psmhelp.com', 'mlfhelp.com', 'paperstreetcash.com', 
     'auth.reptyle.com', 'ccbill.com', 'verotel.com', 'probiller.com', 'google.com', 
@@ -61,7 +61,6 @@ def setup_browser():
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--disable-gpu')
     co.set_argument('--window-size=1920,1080')
-    # افزونه‌های پیش‌فرض بلاک‌کننده‌ی پاپ‌آپ فعال می‌شوند
     co.set_argument('--disable-popup-blocking=false')
     co.set_argument('--disable-blink-features=AutomationControlled')
     co.set_user_agent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
@@ -86,15 +85,23 @@ def export_cookies_for_ytdlp(page, filename=COOKIE_FILE):
     except Exception:
         pass
 
+def close_extra_tabs(page):
+    """بستن تب‌های تبلیغاتی پاپ‌آپ با روش امن در DrissionPage"""
+    try:
+        tab_ids = page.tab_ids
+        if len(tab_ids) > 1:
+            for tid in tab_ids[1:]:
+                page.close_tabs(tabs_or_ids=tid)
+            page.to_tab(tab_ids[0])
+    except Exception:
+        pass
+
 def get_page_and_sniff(page, url):
     """باز کردن صفحه، حل کلودفلر، کلیک روی دکمه‌های Play و شنود شبکه"""
     found_videos = set()
     try:
-        # بستن پاپ‌آپ‌های تبلیغاتی که قبلا باز شده‌اند
-        if len(page.tabs) > 1:
-            page.close_tabs(page.tabs[1:])
+        close_extra_tabs(page)
             
-        # فعال‌سازی رادار شبکه برای استخراج لینک‌های واقعی ویدیو (فقط مدیا)
         page.listen.start(['.mp4', '.m3u8', '.webm', '.ts'])
         page.get(url)
         time.sleep(3)
@@ -111,22 +118,16 @@ def get_page_and_sniff(page, url):
         page.scroll.to_bottom()
         time.sleep(2)
         
-        # اسکرول به بالا و پیدا کردن دکمه‌های Play واقعی
         page.scroll.to_top()
         try:
-            # دکمه‌های Play در پلیرها یا دکمه Unlock در سایت namethatpornad
             btns = page.eles('xpath://button[contains(@class, "play") or contains(@class, "vjs")] | //div[contains(@class, "play")] | //a[contains(text(), "UNLOCK")] | //a[contains(text(), "WATCH")]')
             for btn in btns[:2]:
                 btn.click(by_js=True)
                 time.sleep(3)
         except Exception: pass
         
-        # اگر پاپ‌آپ تبلیغاتی باز شد (سایت‌های tSyndicate و...)، آنها را ببند و به تب اصلی برگرد
-        if len(page.tabs) > 1:
-            page.close_tabs(page.tabs[1:])
-            page.to_tab(page.tabs[0])
+        close_extra_tabs(page)
             
-        # استخراج لینک‌های ویدیو که در شبکه دزدیده شده‌اند
         for packet in page.listen.steps(timeout=4):
             req_url = getattr(packet, 'url', None) or getattr(packet.request, 'url', None)
             if req_url and not is_ignored_url(req_url):
@@ -135,7 +136,8 @@ def get_page_and_sniff(page, url):
     except Exception as e:
         logging.error(f"خطا در پردازش صفحه {url}: {e}")
     finally:
-        page.listen.stop()
+        try: page.listen.stop()
+        except: pass
         export_cookies_for_ytdlp(page)
         
     return page.html, list(found_videos)
@@ -236,7 +238,6 @@ def extract_media_from_post(page, post_url):
         
         soup = BeautifulSoup(html, 'html.parser')
         
-        # استخراج دکمه‌ها و لینک‌های خارجی که به سایت اصلی ویدیو (مثل backroomcastingcouch) می‌روند
         external_links = []
         for a in soup.find_all('a', href=True):
             href = a['href']
@@ -246,18 +247,15 @@ def extract_media_from_post(page, post_url):
             parsed_href = urlparse(href)
             if parsed_href.netloc and parsed_href.netloc != urlparse(post_url).netloc:
                 if not is_ignored_url(href):
-                    # اگر لینک دکمه، یا حاوی کلمات کلیدی تماشای ویدیو بود و به استودیوهای اصلی می‌رفت
                     if "backroomcastingcouch" in href.lower() or "watch" in text or "full" in text or "video" in text or "scene" in text or "unlock" in text or "play" in classes or "btn" in classes or "button" in classes:
                         external_links.append(href)
                         
-        # بررسی سایت‌های مقصد اصلی (فقط آنهایی که مسدود نیستند)
         for ext_url in external_links[:2]:
-            logging.info(f"🔍 دنبال کردن لینک سایت خارجی سازنده ویدیو: {ext_url}")
+            logging.info(f"🔍 دنبال کردن لینک سایت سازنده ویدیو: {ext_url}")
             ext_html, ext_sniffed = get_page_and_sniff(page, ext_url)
             all_videos.update(ext_sniffed)
             all_videos.update(find_all_video_srcs(ext_html, ext_url))
             
-        # بررسی آی‌فریم‌ها
         for iframe in soup.find_all('iframe'):
             src = iframe.get('src') or iframe.get('data-src')
             if src and not src.startswith('javascript:') and not is_ignored_url(src):
