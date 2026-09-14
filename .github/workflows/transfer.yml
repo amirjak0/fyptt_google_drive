@@ -1,51 +1,57 @@
-name: Web Video Downloader to Google Drive
+name: GDrive Scraper Transfer
 
 on:
-  schedule:
-    - cron: '0 0 * * *'
   workflow_dispatch:
-
-permissions:
-  contents: write
+  schedule:
+    # اجرا به صورت خودکار هر روز ساعت 00:00 (زمان به صورت دلخواه قابل تغییر است)
+    - cron: '0 0 * * *'
 
 jobs:
   transfer:
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    - name: Checkout Repository
+      uses: actions/checkout@v4
 
-      - name: Install FFmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+    - name: Install Google Chrome (for DrissionPage)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget xvfb ffmpeg
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+        sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list'
+        sudo apt-get update
+        sudo apt-get install -y google-chrome-stable
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install "yt-dlp[default,curl-cffi]" google-api-python-client google-auth-oauthlib google-auth-httplib2 beautifulsoup4 curl_cffi
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install "yt-dlp[default]" google-api-python-client google-auth-oauthlib google-auth-httplib2 beautifulsoup4 DrissionPage
 
-      - name: Run script
-        env:
-          TARGET_SITE_URL: ${{ secrets.TARGET_SITE_URL }}
-          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
-          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
-          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-          REVERSE_VIDEO_ORDER: ${{ secrets.REVERSE_VIDEO_ORDER || 'False' }}
-        run: python main.py
+    - name: Run Scraper Script
+      env:
+        TARGET_SITE_URL: ${{ secrets.TARGET_SITE_URL || vars.TARGET_SITE_URL }}
+        GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+        GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+        GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID || vars.GDRIVE_FOLDER_ID }}
+        REVERSE_VIDEO_ORDER: ${{ vars.REVERSE_VIDEO_ORDER }}
+      run: |
+        # اجرای اسکریپت پایتون به همراه محیط مجازی نمایش (Xvfb) برای جلوگیری از کرش کردن کروم در لینوکس
+        xvfb-run --auto-servernum python main.py
 
-      # گام جدید برای کامیت و ثبت خودکار فایل تاریخچه در مخزن گیت‌هاب شما
-      - name: Commit and Push History to GitHub
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -f download_history.txt ]; then
-            git add download_history.txt
-            git commit -m "Update download history [skip ci]" && git push || echo "هیچ تغییری برای ذخیره در تاریخچه پیدا نشد."
-          fi
+    - name: Update Download History
+      if: always()
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        if [ -f download_history.txt ]; then
+          git add download_history.txt
+          git commit -m "Update download history [skip ci]" || echo "No changes in history."
+          git push
+        fi
