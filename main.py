@@ -31,7 +31,6 @@ TAB_KEYWORDS = [
     'pornstars', 'new', 'studios', 'niche', 'category', 'tag'
 ]
 
-# دامنه‌های تبلیغاتی که نباید به عنوان ویدیو شناخته شوند
 IGNORED_DOMAINS = [
     'segpay.com', 'epoch.com', 'psmhelp.com', 'mlfhelp.com', 'paperstreetcash.com', 
     'auth.reptyle.com', 'ccbill.com', 'verotel.com', 'probiller.com', 'google.com', 
@@ -53,13 +52,8 @@ IGNORED_KEYWORDS = [
 def setup_browser():
     """راه‌اندازی مرورگر واقعی کروم روی سرور لینوکس گیت‌هاب"""
     co = ChromiumOptions()
-    
-    # تنظیم مسیر دقیق کروم در گیت‌هاب اکشنز تا خطای کانکشن ندهد
     co.set_browser_path('/usr/bin/google-chrome')
-    
-    # استفاده از حالت هدلس جدید که کلودفلر را فریب می‌دهد و روی لینوکس کرش نمی‌کند
     co.set_argument('--headless=new')
-    
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--disable-gpu')
@@ -97,14 +91,12 @@ def get_page_with_cf_bypass(page, url):
         
         if "Just a moment..." in page.html or "Cloudflare" in page.title or "Attention Required" in page.html:
             logging.info(f"🛡️ دیوار کلودفلر شناسایی شد. در حال حل چالش جاوااسکریپت...")
-            
             try:
                 cf_iframe = page.get_frame('@src^https://challenges.cloudflare.com')
                 if cf_iframe:
                     cf_iframe.ele('xpath://input[@type="checkbox"] | //*[@id="challenge-stage"]', timeout=3).click()
             except Exception:
                 pass
-                
             time.sleep(12) 
             
         export_cookies_for_ytdlp(page)
@@ -174,15 +166,41 @@ def is_tab_or_listing(url):
     clean_url = url.lower().split('?')[0].rstrip('/')
     return any(keyword in clean_url for keyword in TAB_KEYWORDS) or '/page/' in clean_url
 
-def find_all_video_srcs(soup, base_url):
+def find_all_video_srcs(html, base_url):
+    """
+    استخراج تمام سورس‌های ویدیویی.
+    در این نسخه از رادار قدرتمند (Regex) برای شخم زدن تمام کدهای جاوااسکریپت و پیدا کردن لینک‌های مخفی استفاده شده است.
+    """
     found_urls = set()
+    soup = BeautifulSoup(html, 'html.parser')
+    
+    # 1. جستجوی تگ‌های استاندارد
     for v in soup.find_all(['video', 'audio']):
         for attr in ['src', 'data-src', 'data-video', 'data-url', 'data-orig']:
-            if v.get(attr) and not v.get(attr).startswith('blob:'): found_urls.add(urljoin(base_url, v.get(attr)))
+            val = v.get(attr)
+            if val and not val.startswith('blob:'): 
+                found_urls.add(urljoin(base_url, val))
         for src_tag in v.find_all('source'):
-            if src_tag.get('src') and not src_tag.get('src').startswith('blob:'): found_urls.add(urljoin(base_url, src_tag.get('src')))
+            val = src_tag.get('src')
+            if val and not val.startswith('blob:'): 
+                found_urls.add(urljoin(base_url, val))
+                
     for a in soup.find_all('a', href=True):
-        if any(a['href'].split('?')[0].lower().endswith(ext) for ext in ['.mp4', '.m3u8', '.webm']): found_urls.add(urljoin(base_url, a['href']))
+        href = a['href']
+        if any(ext in href.lower() for ext in ['.mp4', '.m3u8', '.webm']):
+            found_urls.add(urljoin(base_url, href))
+            
+    # 2. رادار پیشرفته (Regex) برای پیدا کردن لینک‌های مخفی شده در کدهای جاوااسکریپت، JSON و غیره
+    # این الگو هر چیزی که شبیه لینک ویدیو باشد را بیرون می‌کشد (مثل لینکی که فرستادید)
+    pattern = r'(https?://[^\s"\'<>\[\]]+\.(?:mp4|m3u8|webm)(?:\?[^\s"\'<>\[\]]*)?)'
+    for match in re.findall(pattern, html, re.IGNORECASE):
+        found_urls.add(match.replace('\\/', '/'))
+        
+    # جستجوی لینک‌هایی که در JSON فرمت‌بندی شده‌اند (https:\/\/...)
+    escaped_pattern = r'(https?:\\/\\/[^\s"\'<>\[\]]+\.(?:mp4|m3u8|webm)(?:\?[^\s"\'<>\[\]]*)?)'
+    for match in re.findall(escaped_pattern, html, re.IGNORECASE):
+        found_urls.add(match.replace('\\/', '/'))
+
     return list(found_urls)
 
 
@@ -190,15 +208,16 @@ def extract_media_from_post(page, post_url):
     all_videos = set()
     try:
         html = get_page_with_cf_bypass(page, post_url)
-        soup = BeautifulSoup(html, 'html.parser')
-        all_videos.update(find_all_video_srcs(soup, post_url))
+        # پاس دادن کدهای خام HTML به رادار استخراج
+        all_videos.update(find_all_video_srcs(html, post_url))
         
+        soup = BeautifulSoup(html, 'html.parser')
         for iframe in soup.find_all('iframe'):
             src = iframe.get('src') or iframe.get('data-src')
             if src and not src.startswith('javascript:') and not is_ignored_url(src):
                 iframe_url = urljoin(post_url, src)
                 iframe_html = get_page_with_cf_bypass(page, iframe_url)
-                all_videos.update(find_all_video_srcs(BeautifulSoup(iframe_html, 'html.parser'), iframe_url))
+                all_videos.update(find_all_video_srcs(iframe_html, iframe_url))
     except Exception as e:
         logging.error(f"خطا در اسکرپ مدیا: {e}")
 
@@ -315,7 +334,7 @@ def main():
         
     history = load_history()
 
-    logging.info("در حال اجرای موتور مرورگر کروم برای دور زدن فایروال‌ها...")
+    logging.info("در حال اجرای موتور مرورگر کروم مخفی برای دور زدن فایروال‌ها...")
     try:
         browser_page = setup_browser()
     except Exception as e:
