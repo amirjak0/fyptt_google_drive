@@ -31,6 +31,7 @@ TAB_KEYWORDS = [
     'pornstars', 'new', 'studios', 'niche', 'category', 'tag'
 ]
 
+# دامنه‌هایی که ربات اصلاً نباید واردشان شود
 IGNORED_DOMAINS = [
     'segpay.com', 'epoch.com', 'psmhelp.com', 'mlfhelp.com', 'paperstreetcash.com', 
     'auth.reptyle.com', 'ccbill.com', 'verotel.com', 'probiller.com', 'google.com', 
@@ -38,19 +39,19 @@ IGNORED_DOMAINS = [
     'stripchat.com', 'livejasmin.com', 'jerkmate.com', 'myfreecams.com',
     'adultfriendfinder.com', 'cams.com', 'awempire.com', 'clickdealer.com',
     'adtng.com', 'awptg.com', 'trafficjunky.com', 'exoclick.com', 'realsrv.com',
-    'porntraffic.com', 'eroadvertising.com', 'juicyads.com', 'plugrush.com'
+    'porntraffic.com', 'eroadvertising.com', 'juicyads.com', 'plugrush.com',
+    'onlyfans.com', 'fansly.com', 'sttrck.com' # سایت‌های غیرقابل دانلود یا تبلیغاتی اضافه شد
 ]
 
 IGNORED_KEYWORDS = [
     'billingsupport', 'section2257', 'tos', 'privacy', 'refund', 'faq', 
     'technicalsupport', 'content-removal', 'complaints', 'dmca', 'anti-trafficking', 
     'cookie-policy', 'login', 'oauth', 'join', 'signup', 'affiliate', 'amember', 
-    'iamgettingoutnow', 'ad.php', 'out.php'
+    'iamgettingoutnow', 'ad.php', 'out.php', 'adx-dir-d' # فیلتر آدرس‌های تبلیغاتی
 ]
 
 
 def setup_browser():
-    """راه‌اندازی مرورگر واقعی کروم روی سرور لینوکس گیت‌هاب"""
     co = ChromiumOptions()
     co.set_browser_path('/usr/bin/google-chrome')
     co.set_argument('--headless=new')
@@ -60,12 +61,10 @@ def setup_browser():
     co.set_argument('--window-size=1280,720')
     co.set_argument('--disable-blink-features=AutomationControlled')
     co.set_user_agent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
-    
     page = ChromiumPage(co)
     return page
 
 def export_cookies_for_ytdlp(page, filename=COOKIE_FILE):
-    """استخراج کوکی‌های تایید شده‌ی عبور از کلودفلر و ذخیره در فایل متنی برای yt-dlp"""
     try:
         cookies = page.cookies() 
         with open(filename, 'w', encoding='utf-8') as f:
@@ -80,11 +79,10 @@ def export_cookies_for_ytdlp(page, filename=COOKIE_FILE):
                 name = cookie.get('name', '')
                 value = cookie.get('value', '')
                 f.write(f"{domain}\t{initial_dot}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
-    except Exception as e:
+    except Exception:
         pass
 
 def get_page_with_cf_bypass(page, url):
-    """باز کردن سایت و دور زدن چالش کلودفلر"""
     try:
         page.get(url)
         time.sleep(4) 
@@ -167,14 +165,9 @@ def is_tab_or_listing(url):
     return any(keyword in clean_url for keyword in TAB_KEYWORDS) or '/page/' in clean_url
 
 def find_all_video_srcs(html, base_url):
-    """
-    استخراج تمام سورس‌های ویدیویی.
-    در این نسخه از رادار قدرتمند (Regex) برای شخم زدن تمام کدهای جاوااسکریپت و پیدا کردن لینک‌های مخفی استفاده شده است.
-    """
     found_urls = set()
     soup = BeautifulSoup(html, 'html.parser')
     
-    # 1. جستجوی تگ‌های استاندارد
     for v in soup.find_all(['video', 'audio']):
         for attr in ['src', 'data-src', 'data-video', 'data-url', 'data-orig']:
             val = v.get(attr)
@@ -190,13 +183,10 @@ def find_all_video_srcs(html, base_url):
         if any(ext in href.lower() for ext in ['.mp4', '.m3u8', '.webm']):
             found_urls.add(urljoin(base_url, href))
             
-    # 2. رادار پیشرفته (Regex) برای پیدا کردن لینک‌های مخفی شده در کدهای جاوااسکریپت، JSON و غیره
-    # این الگو هر چیزی که شبیه لینک ویدیو باشد را بیرون می‌کشد (مثل لینکی که فرستادید)
     pattern = r'(https?://[^\s"\'<>\[\]]+\.(?:mp4|m3u8|webm)(?:\?[^\s"\'<>\[\]]*)?)'
     for match in re.findall(pattern, html, re.IGNORECASE):
         found_urls.add(match.replace('\\/', '/'))
         
-    # جستجوی لینک‌هایی که در JSON فرمت‌بندی شده‌اند (https:\/\/...)
     escaped_pattern = r'(https?:\\/\\/[^\s"\'<>\[\]]+\.(?:mp4|m3u8|webm)(?:\?[^\s"\'<>\[\]]*)?)'
     for match in re.findall(escaped_pattern, html, re.IGNORECASE):
         found_urls.add(match.replace('\\/', '/'))
@@ -208,7 +198,6 @@ def extract_media_from_post(page, post_url):
     all_videos = set()
     try:
         html = get_page_with_cf_bypass(page, post_url)
-        # پاس دادن کدهای خام HTML به رادار استخراج
         all_videos.update(find_all_video_srcs(html, post_url))
         
         soup = BeautifulSoup(html, 'html.parser')
@@ -225,7 +214,9 @@ def extract_media_from_post(page, post_url):
         if not (post_url.endswith('/?0') or '#' in post_url):
             all_videos.add(post_url)
             
-    return list(all_videos)
+    # قبل از برگشت، لیست را فیلتر می‌کنیم تا دامنه های غیرمجاز وارد yt-dlp نشوند
+    filtered_videos = [v for v in all_videos if not is_ignored_url(v)]
+    return filtered_videos
 
 
 def scrape_all_tabs_and_posts(page, target_site_url, history):
@@ -280,7 +271,7 @@ def download_video(video_url, download_dir, referer, user_agent):
         'quiet': False,
         'no_warnings': True,
         'noplaylist': True,
-        'ignoreerrors': True,
+        'ignoreerrors': True, # با این گزینه اگر خطای 403 بدهد، کرش نمی‌کند
         'cookiefile': COOKIE_FILE, 
         'http_headers': {
             'User-Agent': user_agent,
@@ -291,14 +282,21 @@ def download_video(video_url, download_dir, referer, user_agent):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
-            if not info: return None
+            if not info: 
+                logging.warning(f"ویدیویی در لینک پیدا نشد یا دسترسی مسدود است: {video_url}")
+                return None
             downloaded_filename = ydl.prepare_filename(info)
             if os.path.exists(downloaded_filename): return downloaded_filename
             base = os.path.splitext(downloaded_filename)[0]
             for f in os.listdir(download_dir):
                 if f.startswith(os.path.basename(base)): return os.path.join(download_dir, f)
     except Exception as e:
-        logging.error(f"خطای دانلود: {e}")
+        # مدیریت خطاهای خاص مانند 403 به شکل خواناتر
+        err_msg = str(e)
+        if '403' in err_msg or 'Forbidden' in err_msg:
+             logging.warning(f"خطای دسترسی 403: اجازه دانلود از سرور صادر نشد -> {video_url}")
+        else:
+             logging.error(f"خطای دانلود: {e}")
     return None
 
 
