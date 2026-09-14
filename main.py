@@ -5,10 +5,10 @@ import time
 import logging
 import mimetypes
 from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
-from bs4 import BeautifulSoup
 
 try:
     from DrissionPage import ChromiumOptions, ChromiumPage
+    from DrissionPage.common import By
 except ImportError:
     logging.error("کتابخانه DrissionPage نصب نیست. لطفا در فایل اکشن گیت‌هاب آن را نصب کنید.")
     sys.exit(1)
@@ -18,6 +18,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.auth.transport.requests import Request
+from bs4 import BeautifulSoup
 
 # تنظیمات لاگ‌گیری
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
@@ -40,14 +41,14 @@ IGNORED_DOMAINS = [
     'adultfriendfinder.com', 'cams.com', 'awempire.com', 'clickdealer.com',
     'adtng.com', 'awptg.com', 'trafficjunky.com', 'exoclick.com', 'realsrv.com',
     'porntraffic.com', 'eroadvertising.com', 'juicyads.com', 'plugrush.com',
-    'onlyfans.com', 'fansly.com', 'sttrck.com' # سایت‌های غیرقابل دانلود یا تبلیغاتی اضافه شد
+    'onlyfans.com', 'fansly.com', 'sttrck.com', 'ads.sttrck.com'
 ]
 
 IGNORED_KEYWORDS = [
     'billingsupport', 'section2257', 'tos', 'privacy', 'refund', 'faq', 
     'technicalsupport', 'content-removal', 'complaints', 'dmca', 'anti-trafficking', 
     'cookie-policy', 'login', 'oauth', 'join', 'signup', 'affiliate', 'amember', 
-    'iamgettingoutnow', 'ad.php', 'out.php', 'adx-dir-d' # فیلتر آدرس‌های تبلیغاتی
+    'iamgettingoutnow', 'ad.php', 'out.php', 'adx-dir-d'
 ]
 
 
@@ -84,6 +85,11 @@ def export_cookies_for_ytdlp(page, filename=COOKIE_FILE):
 
 def get_page_with_cf_bypass(page, url):
     try:
+        # پاک کردن تب‌های اضافه و روشن کردن شنود شبکه برای دزدیدن لینک‌های mp4 مخفی شده در پلیر
+        if len(page.tabs) > 1:
+            page.close_tabs(page.tabs[1:])
+            
+        page.listen.start('*.mp4*') # فعال کردن شنودگر روی پسوندهای ویدیویی
         page.get(url)
         time.sleep(4) 
         
@@ -97,6 +103,10 @@ def get_page_with_cf_bypass(page, url):
                 pass
             time.sleep(12) 
             
+        # اسکرول به پایین برای تریگر شدن ویدیوهای Lazy Load
+        page.scroll.to_bottom()
+        time.sleep(2)
+        
         export_cookies_for_ytdlp(page)
         return page.html
     except Exception as e:
@@ -164,10 +174,11 @@ def is_tab_or_listing(url):
     clean_url = url.lower().split('?')[0].rstrip('/')
     return any(keyword in clean_url for keyword in TAB_KEYWORDS) or '/page/' in clean_url
 
-def find_all_video_srcs(html, base_url):
+def find_all_video_srcs(html, base_url, page):
     found_urls = set()
     soup = BeautifulSoup(html, 'html.parser')
     
+    # روش اول: استخراج استاندارد از تگ‌ها
     for v in soup.find_all(['video', 'audio']):
         for attr in ['src', 'data-src', 'data-video', 'data-url', 'data-orig']:
             val = v.get(attr)
@@ -183,6 +194,7 @@ def find_all_video_srcs(html, base_url):
         if any(ext in href.lower() for ext in ['.mp4', '.m3u8', '.webm']):
             found_urls.add(urljoin(base_url, href))
             
+    # روش دوم: رادار Regex برای کدهای JS و متغیرها
     pattern = r'(https?://[^\s"\'<>\[\]]+\.(?:mp4|m3u8|webm)(?:\?[^\s"\'<>\[\]]*)?)'
     for match in re.findall(pattern, html, re.IGNORECASE):
         found_urls.add(match.replace('\\/', '/'))
@@ -191,6 +203,17 @@ def find_all_video_srcs(html, base_url):
     for match in re.findall(escaped_pattern, html, re.IGNORECASE):
         found_urls.add(match.replace('\\/', '/'))
 
+    # روش سوم (اسلحه مخفی!): برداشتن مستقیم لینک‌های ویدیویی از Network Sniffer مرورگر
+    try:
+        packets = page.listen.steps(timeout=2)
+        for packet in packets:
+            url = packet.request.url
+            if any(ext in url.lower() for ext in ['.mp4', '.m3u8', '.webm']):
+                found_urls.add(url)
+    except Exception:
+        pass
+    
+    page.listen.stop()
     return list(found_urls)
 
 
@@ -198,15 +221,18 @@ def extract_media_from_post(page, post_url):
     all_videos = set()
     try:
         html = get_page_with_cf_bypass(page, post_url)
-        all_videos.update(find_all_video_srcs(html, post_url))
+        all_videos.update(find_all_video_srcs(html, post_url, page))
         
         soup = BeautifulSoup(html, 'html.parser')
+        
+        # بررسی فریم‌ها و کلیک روی دکمه‌های Play مخفی
         for iframe in soup.find_all('iframe'):
             src = iframe.get('src') or iframe.get('data-src')
             if src and not src.startswith('javascript:') and not is_ignored_url(src):
                 iframe_url = urljoin(post_url, src)
                 iframe_html = get_page_with_cf_bypass(page, iframe_url)
-                all_videos.update(find_all_video_srcs(iframe_html, iframe_url))
+                all_videos.update(find_all_video_srcs(iframe_html, iframe_url, page))
+                
     except Exception as e:
         logging.error(f"خطا در اسکرپ مدیا: {e}")
 
@@ -214,7 +240,6 @@ def extract_media_from_post(page, post_url):
         if not (post_url.endswith('/?0') or '#' in post_url):
             all_videos.add(post_url)
             
-    # قبل از برگشت، لیست را فیلتر می‌کنیم تا دامنه های غیرمجاز وارد yt-dlp نشوند
     filtered_videos = [v for v in all_videos if not is_ignored_url(v)]
     return filtered_videos
 
@@ -249,6 +274,7 @@ def scrape_all_tabs_and_posts(page, target_site_url, history):
                 parsed_post = urlparse(full_post_url)
                 is_internal = parsed_post.netloc == base_domain
                 
+                # به ربات می‌گوییم هر لینکی که به صفحه داخلی سایت هدف نمی‌رود (لینک خارجی است) را هم به عنوان پست قبول کند!
                 if not is_tab_or_listing(full_post_url):
                     if not is_internal and parsed_post.path in ['', '/']:
                         continue
@@ -271,7 +297,7 @@ def download_video(video_url, download_dir, referer, user_agent):
         'quiet': False,
         'no_warnings': True,
         'noplaylist': True,
-        'ignoreerrors': True, # با این گزینه اگر خطای 403 بدهد، کرش نمی‌کند
+        'ignoreerrors': True,
         'cookiefile': COOKIE_FILE, 
         'http_headers': {
             'User-Agent': user_agent,
@@ -291,7 +317,6 @@ def download_video(video_url, download_dir, referer, user_agent):
             for f in os.listdir(download_dir):
                 if f.startswith(os.path.basename(base)): return os.path.join(download_dir, f)
     except Exception as e:
-        # مدیریت خطاهای خاص مانند 403 به شکل خواناتر
         err_msg = str(e)
         if '403' in err_msg or 'Forbidden' in err_msg:
              logging.warning(f"خطای دسترسی 403: اجازه دانلود از سرور صادر نشد -> {video_url}")
