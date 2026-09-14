@@ -53,6 +53,7 @@ IGNORED_KEYWORDS = [
     'iamgettingoutnow', 'ad.php', 'out.php', 'adx-dir-d', 'link?aid='
 ]
 
+
 def setup_browser():
     co = ChromiumOptions()
     co.set_browser_path('/usr/bin/google-chrome')
@@ -97,12 +98,11 @@ def close_extra_tabs(page):
         pass
 
 def get_page_and_sniff(page, url):
-    """باز کردن صفحه، حل کلودفلر، کلیک روی دکمه‌های Play و شنود شبکه"""
     found_videos = set()
     try:
         close_extra_tabs(page)
             
-        page.listen.start(['.mp4', '.m3u8', '.webm', '.ts'])
+        page.listen.start(['.mp4', '.m3u8', '.webm', '.ts', '.mov', '.mkv'])
         page.get(url)
         time.sleep(3)
         
@@ -195,6 +195,11 @@ def upload_to_gdrive(service, file_path, folder_id):
 def is_ignored_url(url):
     parsed = urlparse(url)
     domain, path = parsed.netloc.lower(), parsed.path.lower()
+    
+    # مسدود کردن فایل‌های جاوااسکریپت و تبلیغاتی که نباید به عنوان ویدیو شناخته شوند
+    IGNORED_EXTENSIONS = ['.js', '.css', '.png', '.jpg', '.gif', '.json', '.php', '.html', '.woff']
+    if any(path.endswith(ext) for ext in IGNORED_EXTENSIONS): return True
+    
     if any(ig_dom in domain for ig_dom in IGNORED_DOMAINS): return True
     if any(ig_kw in path for ig_kw in IGNORED_KEYWORDS): return True
     return False
@@ -247,10 +252,10 @@ def extract_media_from_post(page, post_url):
             parsed_href = urlparse(href)
             if parsed_href.netloc and parsed_href.netloc != urlparse(post_url).netloc:
                 if not is_ignored_url(href):
-                    if "backroomcastingcouch" in href.lower() or "watch" in text or "full" in text or "video" in text or "scene" in text or "unlock" in text or "play" in classes or "btn" in classes or "button" in classes:
+                    if "backroom" in href.lower() or "watch" in text or "full" in text or "video" in text or "scene" in text or "unlock" in text or "play" in classes or "btn" in classes or "button" in classes:
                         external_links.append(href)
                         
-        for ext_url in external_links[:2]:
+        for ext_url in external_links[:3]:
             logging.info(f"🔍 دنبال کردن لینک سایت سازنده ویدیو: {ext_url}")
             ext_html, ext_sniffed = get_page_and_sniff(page, ext_url)
             all_videos.update(ext_sniffed)
@@ -340,7 +345,14 @@ def download_video(video_url, download_dir, referer, user_agent):
                 logging.warning(f"ویدیویی در لینک پیدا نشد یا دسترسی مسدود است: {video_url}")
                 return None
             downloaded_filename = ydl.prepare_filename(info)
-            if os.path.exists(downloaded_filename): return downloaded_filename
+            if os.path.exists(downloaded_filename):
+                # اگر فایلی با فرمت‌های نامعتبر دانلود شد، آن را نگه نمی‌داریم
+                if downloaded_filename.endswith(('.unknown_video', '.js', '.css', '.html')):
+                    try: os.remove(downloaded_filename)
+                    except: pass
+                    return None
+                return downloaded_filename
+                
             base = os.path.splitext(downloaded_filename)[0]
             for f in os.listdir(download_dir):
                 if f.startswith(os.path.basename(base)): return os.path.join(download_dir, f)
