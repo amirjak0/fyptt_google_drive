@@ -33,9 +33,32 @@ jobs:
         python -m pip install --upgrade pip
         pip install "yt-dlp[default]" google-api-python-client google-auth-oauthlib google-auth-httplib2 beautifulsoup4 DrissionPage
 
+    - name: Select Target Site
+      run: |
+        SITE_INDEX="0"
+        if [ -f site_rotation.txt ]; then
+          SITE_INDEX=$(tr -d '[:space:]' < site_rotation.txt)
+        fi
+
+        case "$SITE_INDEX" in
+          0)
+            TARGET_URL="https://namethatpornad.com/"
+            ;;
+          1)
+            TARGET_URL="https://fyptt.to/"
+            ;;
+          *)
+            SITE_INDEX="0"
+            TARGET_URL="https://namethatpornad.com/"
+            ;;
+        esac
+
+        echo "TARGET_SITE_URL=$TARGET_URL" >> "$GITHUB_ENV"
+        echo "SITE_INDEX=$SITE_INDEX" >> "$GITHUB_ENV"
+        echo "🌐 سایت این اجرا: $TARGET_URL"
+
     - name: Run Scraper Script
       env:
-        TARGET_SITE_URL: ${{ secrets.TARGET_SITE_URL || vars.TARGET_SITE_URL }}
         GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
         GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
         GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
@@ -45,13 +68,22 @@ jobs:
         # اجرای اسکریپت پایتون به همراه محیط مجازی نمایش (Xvfb) برای جلوگیری از کرش کردن کروم در لینوکس
         xvfb-run --auto-servernum python main.py
 
-    - name: Update Download History
+    - name: Update Download History and Site Rotation
       if: always()
       run: |
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+        if [ "${SITE_INDEX:-0}" = "0" ]; then
+          echo "1" > site_rotation.txt
+        else
+          echo "0" > site_rotation.txt
+        fi
+
+        git add site_rotation.txt
         if [ -f download_history.txt ]; then
           git add download_history.txt
-          git commit -m "Update download history [skip ci]" || echo "No changes in history."
-          git push
         fi
+
+        git commit -m "Update scraper history and site rotation [skip ci]" || echo "No changes to commit."
+        git push
