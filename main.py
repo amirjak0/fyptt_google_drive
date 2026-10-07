@@ -114,7 +114,16 @@ def get_page_and_sniff(page, url):
                     cf_iframe.ele('xpath://input[@type="checkbox"] | //*[@id="challenge-stage"]', timeout=3).click()
             except Exception: pass
             time.sleep(12)
-            
+
+        # تشخیص بلاک شدن (برای اینکه علت صفر شدن دانلودها در لاگ مشخص باشد)
+        try:
+            title_l = (page.title or '').lower()
+            html_len = len(page.html or '')
+            blocked_markers = ['403', 'forbidden', 'access denied', 'just a moment', 'attention required', 'blocked', 'captcha']
+            if any(m in title_l for m in blocked_markers) or html_len < 2000:
+                logging.warning(f"⚠️ احتمال بلاک شدن یا چالش حل‌نشده: url={url} | title='{page.title}' | html_len={html_len}")
+        except Exception: pass
+
         page.scroll.to_bottom()
         time.sleep(2)
         
@@ -205,8 +214,14 @@ def is_ignored_url(url):
     return False
 
 def is_tab_or_listing(url):
-    clean_url = url.lower().split('?')[0].rstrip('/')
-    return any(keyword in clean_url for keyword in TAB_KEYWORDS) or '/page/' in clean_url
+    # فقط بخش‌های مسیر (path segment) بررسی می‌شوند، نه کل آدرس؛
+    # در غیر این صورت پست‌هایی که slug آن‌ها شامل new / hot / top / upcoming است
+    # اشتباهاً صفحهٔ لیست حساب می‌شدند و رد می‌شدند.
+    path = urlparse(url.lower()).path
+    segments = [s for s in path.split('/') if s]
+    if not segments:
+        return False
+    return segments[0] in TAB_KEYWORDS or 'page' in segments
 
 def find_all_video_srcs(html, base_url):
     found_urls = set()
@@ -411,7 +426,10 @@ def main():
         logging.info(f"\nشروع بررسی سایت: {target_site_url}")
         
         post_links = scrape_all_tabs_and_posts(browser_page, target_site_url, history)
-        
+        logging.info(f"📊 {target_site_url}: {len(post_links)} پست جدید پیدا شد.")
+        if not post_links:
+            logging.warning(f"⚠️ هیچ پست جدیدی از {target_site_url} پیدا نشد؛ سایت ممکن است ما را بلاک کرده یا ساختارش عوض شده باشد.")
+
         for idx, post_url in enumerate(post_links, 1):
             if get_clean_url_key(post_url) in history: continue
 
