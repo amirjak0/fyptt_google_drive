@@ -3,18 +3,17 @@ name: GDrive Scraper Transfer
 on:
   workflow_dispatch:
   schedule:
-    # اجرا به صورت خودکار هر روز ساعت 00:00 (زمان به صورت دلخواه قابل تغییر است)
     - cron: '0 0 * * *'
 
 jobs:
-  transfer:
+  transfer_all:
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    - name: Install Google Chrome (for DrissionPage)
+    - name: Install Google Chrome
       run: |
         sudo apt-get update
         sudo apt-get install -y wget xvfb ffmpeg gnupg
@@ -31,9 +30,9 @@ jobs:
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install "yt-dlp[default]" google-api-python-client google-auth-oauthlib google-auth-httplib2 beautifulsoup4 DrissionPage
+        pip install "yt-dlp[default]" requests google-api-python-client google-auth-oauthlib google-auth-httplib2 beautifulsoup4 DrissionPage
 
-    - name: Select Target Site
+    - name: Select Target Site for Videos
       run: |
         SITE_INDEX="0"
         if [ -f site_rotation.txt ]; then
@@ -55,35 +54,45 @@ jobs:
 
         echo "TARGET_SITE_URL=$TARGET_URL" >> "$GITHUB_ENV"
         echo "SITE_INDEX=$SITE_INDEX" >> "$GITHUB_ENV"
-        echo "🌐 سایت این اجرا: $TARGET_URL"
 
-    - name: Run Scraper Script
+    - name: Run Video Scraper
       env:
         GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
         GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
         GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
         GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID || vars.GDRIVE_FOLDER_ID }}
-        REVERSE_VIDEO_ORDER: ${{ vars.REVERSE_VIDEO_ORDER }}
       run: |
-        # اجرای اسکریپت پایتون به همراه محیط مجازی نمایش (Xvfb) برای جلوگیری از کرش کردن کروم در لینوکس
         xvfb-run --auto-servernum python main.py
 
-    - name: Update Download History and Site Rotation
+    - name: Run Image Scraper
+      env:
+        GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+        GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+        GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID || vars.GDRIVE_FOLDER_ID }}
+      run: |
+        xvfb-run --auto-servernum python image_scraper.py
+
+    - name: Update All Histories
       if: always()
       run: |
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
+        
         if [ "${SITE_INDEX:-0}" = "0" ]; then
           echo "1" > site_rotation.txt
         else
           echo "0" > site_rotation.txt
         fi
-
         git add site_rotation.txt
+        
         if [ -f download_history.txt ]; then
           git add download_history.txt
         fi
-
-        git commit -m "Update scraper history and site rotation [skip ci]" || echo "No changes to commit."
+        
+        if [ -f image_download_history.txt ]; then
+          git add image_download_history.txt
+        fi
+        
+        git commit -m "Update all scraper histories [skip ci]" || echo "No changes to commit."
         git push
