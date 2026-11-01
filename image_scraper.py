@@ -28,9 +28,21 @@ def setup_browser():
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--disable-gpu')
     co.set_argument('--window-size=1920,1080')
+    co.set_argument('--disable-blink-features=AutomationControlled')
     co.set_user_agent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
     page = ChromiumPage(co)
     return page
+
+def bypass_cloudflare(page):
+    """بررسی و دور زدن سیستم امنیتی کلودفلر"""
+    if "Just a moment..." in page.html or "Cloudflare" in page.title or "Attention Required" in page.html:
+        logging.info("سیستم امنیتی کلودفلر تشخیص داده شد. در حال عبور...")
+        try:
+            cf_iframe = page.get_frame('@src^https://challenges.cloudflare.com')
+            if cf_iframe:
+                cf_iframe.ele('xpath://input[@type="checkbox"] | //*[@id="challenge-stage"]', timeout=3).click()
+        except Exception: pass
+        time.sleep(12)
 
 def load_history():
     history = set()
@@ -62,10 +74,10 @@ def upload_to_gdrive(service, file_path, folder_id):
         file_metadata = {'name': file_name, 'parents': [folder_id] if folder_id else []}
         media = MediaFileUpload(file_path, resumable=True)
         uploaded = service.files().create(body=file_metadata, media_body=media, fields='id, name').execute()
-        logging.info(f"✅ آپلود موفق عکس: {file_name}")
+        logging.info(f"آپلود موفق عکس: {file_name}")
         return True
     except Exception as e:
-        logging.error(f"❌ خطا در آپلود عکس: {e}")
+        logging.error(f"خطا در آپلود عکس: {e}")
         return False
 
 def download_image(img_url, download_dir, session):
@@ -105,14 +117,15 @@ def main():
     try:
         page.get(TARGET_URL)
         time.sleep(5)
+        bypass_cloudflare(page)
         
-        # پیدا کردن لینک آلبوم‌ها
-        album_elements = page.eles("a.rel-link")
+        # پیدا کردن لینک آلبوم‌ها با روش دقیق‌تر
+        album_elements = page.eles("xpath://a[contains(@href, '/galleries/')]")
         new_albums = []
         
         for el in album_elements:
             link = el.attr('href')
-            if link and '/galleries/' in link:
+            if link:
                 full_link = urljoin(TARGET_URL, link)
                 if full_link not in history and full_link not in new_albums:
                     new_albums.append(full_link)
@@ -130,16 +143,18 @@ def main():
             logging.info(f"[{idx}/{len(albums_to_process)}] در حال پردازش آلبوم: {album_url}")
             page.get(album_url)
             time.sleep(4)
+            bypass_cloudflare(page)
             
             page.scroll.to_bottom()
             time.sleep(2)
             
-            image_elements = page.eles("a.rel-link")
+            # پیدا کردن عکس‌های باکیفیت با روش دقیق‌تر
+            image_elements = page.eles("xpath://a[contains(@href, '.jpg') or contains(@href, '.png')]")
             image_urls = []
             
             for el in image_elements:
                 link = el.attr('href')
-                if link and (link.endswith('.jpg') or link.endswith('.png')):
+                if link:
                     full_img_url = urljoin(album_url, link)
                     if full_img_url not in image_urls:
                         image_urls.append(full_img_url)
