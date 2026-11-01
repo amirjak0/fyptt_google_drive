@@ -116,17 +116,17 @@ def main():
     
     try:
         page.get(TARGET_URL)
-        time.sleep(5)
+        time.sleep(8) # زمان بیشتر برای لود کامل صفحه
         bypass_cloudflare(page)
         
-        # پیدا کردن لینک آلبوم‌ها با روش دقیق‌تر
-        album_elements = page.eles("xpath://a[contains(@href, '/galleries/')]")
+        # روش جدید و مطمئن‌تر برای پیدا کردن آلبوم‌ها
+        all_links = page.eles('tag:a')
         new_albums = []
         
-        for el in album_elements:
-            link = el.attr('href')
-            if link:
-                full_link = urljoin(TARGET_URL, link)
+        for link in all_links:
+            href = link.attr('href')
+            if href and '/galleries/' in href:
+                full_link = urljoin(TARGET_URL, href)
                 if full_link not in history and full_link not in new_albums:
                     new_albums.append(full_link)
                     
@@ -142,20 +142,20 @@ def main():
         for idx, album_url in enumerate(albums_to_process, 1):
             logging.info(f"[{idx}/{len(albums_to_process)}] در حال پردازش آلبوم: {album_url}")
             page.get(album_url)
-            time.sleep(4)
+            time.sleep(5)
             bypass_cloudflare(page)
             
             page.scroll.to_bottom()
-            time.sleep(2)
+            time.sleep(3)
             
-            # پیدا کردن عکس‌های باکیفیت با روش دقیق‌تر
-            image_elements = page.eles("xpath://a[contains(@href, '.jpg') or contains(@href, '.png')]")
+            # روش جدید برای پیدا کردن عکس‌های باکیفیت
+            all_img_links = page.eles('tag:a')
             image_urls = []
             
-            for el in image_elements:
-                link = el.attr('href')
-                if link:
-                    full_img_url = urljoin(album_url, link)
+            for link in all_img_links:
+                href = link.attr('href')
+                if href and (href.lower().endswith('.jpg') or href.lower().endswith('.png')):
+                    full_img_url = urljoin(album_url, href)
                     if full_img_url not in image_urls:
                         image_urls.append(full_img_url)
                     
