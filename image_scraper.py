@@ -3,7 +3,7 @@ import sys
 import time
 import logging
 import requests
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from DrissionPage import ChromiumOptions, ChromiumPage
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -80,13 +80,27 @@ def upload_to_gdrive(service, file_path, folder_id):
         logging.error(f"خطا در آپلود عکس: {e}")
         return False
 
-def download_image(img_url, download_dir, session):
+def get_album_name(album_url):
+    """اسم آلبوم را از انتهای مسیر URL می‌گیرد."""
+    try:
+        parts = [p for p in urlparse(album_url).path.split('/') if p]
+        if parts:
+            return parts[-1]
+    except Exception:
+        pass
+    return f"album_{int(time.time())}"
+
+def download_image(img_url, download_dir, session, custom_name=None):
     try:
         response = session.get(img_url, stream=True, timeout=15)
         if response.status_code == 200:
-            file_name = img_url.split('/')[-1].split('?')[0]
-            if not file_name or not file_name.endswith('.jpg'):
-                file_name = f"image_{int(time.time())}.jpg"
+            if custom_name:
+                file_name = custom_name
+            else:
+                file_name = img_url.split('/')[-1].split('?')[0]
+                if not file_name or not file_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    ext = '.png' if img_url.split('?')[0].lower().endswith('.png') else '.jpg'
+                    file_name = f"image_{int(time.time())}{ext}"
             
             file_path = os.path.join(download_dir, file_name)
             with open(file_path, 'wb') as f:
@@ -161,9 +175,12 @@ def main():
                     
             logging.info(f"تعداد {len(image_urls)} عکس در این آلبوم پیدا شد.")
             
+            album_name = get_album_name(album_url)
             all_success = True
-            for img_url in image_urls:
-                downloaded_file = download_image(img_url, DOWNLOAD_DIR, session)
+            for i, img_url in enumerate(image_urls, 1):
+                ext = '.png' if img_url.split('?')[0].lower().endswith('.png') else '.jpg'
+                new_name = f"{album_name}_{i:03d}{ext}"
+                downloaded_file = download_image(img_url, DOWNLOAD_DIR, session, custom_name=new_name)
                 if downloaded_file:
                     success = upload_to_gdrive(drive_service, downloaded_file, gdrive_folder_id)
                     if not success:
